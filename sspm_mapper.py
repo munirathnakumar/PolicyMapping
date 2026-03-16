@@ -296,42 +296,126 @@ class PolicyLoader:
 
 # ── Encoder ───────────────────────────────────────────────────────────────────
 
-# Path to your locally downloaded SecBERT model folder.
-# How to download:
-#   pip install transformers
-#   python -c "from transformers import AutoTokenizer, AutoModel; \
-#              AutoTokenizer.from_pretrained('jackaduma/SecBERT', cache_dir='./secbert_model'); \
-#              AutoModel.from_pretrained('jackaduma/SecBERT', cache_dir='./secbert_model')"
-# Then set SECBERT_MODEL_PATH to that folder, e.g. "./secbert_model"
-# Leave as None to auto-download from HuggingFace (requires internet).
-SECBERT_MODEL_PATH = None   # e.g. "./secbert_model"  or  "/opt/models/secbert"
+# ── SET THIS to your local model folder — NEVER leave as None in production ──
+# Run python download_secbert.py once to download the model locally.
+# Then set this path so the program NEVER contacts HuggingFace again.
+#
+# Examples:
+#   SECBERT_MODEL_PATH = "./secbert_clean"        # relative to project folder
+#   SECBERT_MODEL_PATH = "./secbert_model"        # if you used download_secbert.py
+#   SECBERT_MODEL_PATH = "/opt/models/secbert"    # absolute path
+#
+# If None → attempts HuggingFace download (requires internet)
+SECBERT_MODEL_PATH = "./secbert_model"   # ← SET THIS TO YOUR FOLDER
+
+
+def _find_model_path(base_path: str) -> str:
+    """
+    Resolve the actual model directory from a given base path.
+
+    Handles two folder structures:
+      1. Flat (save_pretrained output):
+             secbert_clean/
+               config.json
+               model.safetensors / pytorch_model.bin
+               tokenizer.json
+               vocab.txt
+
+      2. HuggingFace cache structure (cache_dir output):
+             secbert_model/
+               models--jackaduma--SecBERT/
+                 snapshots/
+                   <hash>/
+                     config.json ...
+
+    Returns the path that actually contains config.json.
+    Raises FileNotFoundError with a clear message if nothing found.
+    """
+    import os
+    from pathlib import Path
+
+    base = Path(base_path)
+
+    # ── Check if base itself is a flat model folder ───────────────────────────
+    if (base / "config.json").exists():
+        return str(base)
+
+    # ── Check HuggingFace cache structure ─────────────────────────────────────
+    # Pattern: base/models--<org>--<model>/snapshots/<hash>/config.json
+    for snapshots_dir in base.rglob("snapshots"):
+        if snapshots_dir.is_dir():
+            # Get the most recent snapshot (sorted by name)
+            snapshots = sorted(snapshots_dir.iterdir(), reverse=True)
+            for snap in snapshots:
+                if (snap / "config.json").exists():
+                    return str(snap)
+
+    # ── Check one level deep (user may have pointed to parent folder) ─────────
+    for child in base.iterdir():
+        if child.is_dir() and (child / "config.json").exists():
+            return str(child)
+
+    # ── Nothing found ─────────────────────────────────────────────────────────
+    raise FileNotFoundError(
+        f"\n\n  ❌  SecBERT model not found at: {base_path}"
+        f"\n     Expected to find config.json inside this folder."
+        f"\n     Run:  python download_secbert.py"
+        f"\n     Then set SECBERT_MODEL_PATH = \"./secbert_clean\" in sspm_mapper.py"
+    )
 
 
 class SecBERTEncoder:
     """
     Encodes text using SecBERT.
-    Loads from SECBERT_MODEL_PATH (local folder) if set, otherwise downloads.
+
+    Loading priority:
+      1. model_path argument (passed at runtime via --model)
+      2. SECBERT_MODEL_PATH constant set at top of this file
+      3. HuggingFace download — ONLY if both above are None/empty
+
+    Automatically handles both flat (save_pretrained) and
+    HuggingFace cache_dir folder structures.
     Falls back to TF-IDF if transformers/torch unavailable.
     """
 
     def __init__(self, model_path: str = None):
         self.mode = None
-        # Priority: explicit argument > module-level constant > HuggingFace download
-        self.model_path = model_path or SECBERT_MODEL_PATH or "jackaduma/SecBERT"
+        # Priority: runtime arg > file constant > HuggingFace (last resort)
+        raw_path = model_path or SECBERT_MODEL_PATH or None
+        self.model_path = raw_path   # may be None if no local path configured
         self._load()
 
     def _load(self):
         try:
             from transformers import AutoTokenizer, AutoModel
             import torch
-            src = self.model_path
-            print(f"🔄  Loading SecBERT from: {src}")
-            self.tokenizer = AutoTokenizer.from_pretrained(src, local_files_only=(src != "jackaduma/SecBERT"))
-            self.model     = AutoModel.from_pretrained(src, local_files_only=(src != "jackaduma/SecBERT"))
+
+            if self.model_path:
+                # ── Local folder — resolve exact path, never hit network ──────
+                resolved = _find_model_path(self.model_path)
+                print(f"🔄  Loading SecBERT from local folder: {resolved}")
+                self.tokenizer = AutoTokenizer.from_pretrained(
+                    resolved, local_files_only=True)
+                self.model = AutoModel.from_pretrained(
+                    resolved, local_files_only=True)
+            else:
+                # ── No local path set — download from HuggingFace ─────────────
+                print(f"⚠️   SECBERT_MODEL_PATH is not set.")
+                print(f"     Downloading from HuggingFace (requires internet)...")
+                print(f"     To avoid this, run: python download_secbert.py")
+                print(f"     Then set SECBERT_MODEL_PATH = \"./secbert_clean\" in sspm_mapper.py\n")
+                self.tokenizer = AutoTokenizer.from_pretrained("jackaduma/SecBERT")
+                self.model     = AutoModel.from_pretrained("jackaduma/SecBERT")
+
             self.model.eval()
             self.torch = torch
             self.mode  = "secbert"
             print("✅  SecBERT ready.\n")
+
+        except FileNotFoundError as e:
+            print(e)
+            print("\n    → Falling back to TF-IDF mode\n")
+            self.mode = "tfidf"
         except Exception as e:
             print(f"⚠️  SecBERT unavailable ({e})\n    → TF-IDF fallback mode\n")
             self.mode = "tfidf"
@@ -664,63 +748,97 @@ class SSPMMapper:
                                  pol_results:  list[PolicyResult]) -> dict:
         """
         Classify all mapping relationships into:
-          one_to_one    : 1 control  → 1 policy
-          one_to_many   : 1 control  → many policies
-          many_to_one   : many controls → 1 policy
-          many_to_many  : many controls → many policies (overlapping cluster)
+          one_to_one    : 1 control  → exactly 1 policy
+          one_to_many   : 1 control  → 2+ policies
+          many_to_one   : 2+ controls → same 1 policy
+          many_to_many  : 2+ controls share 2+ overlapping policies
+
+        Includes ALL match types: FULL, PARTIAL, INDIRECT.
         """
-        # control → matched policy ids
-        ctrl_to_pols = {
-            r.control_id: set(m.policy_id for m in r.matches
-                              if m.coverage in ("FULL", "PARTIAL"))
-            for r in ctrl_results
-        }
-        # policy → matched control ids
-        pol_to_ctrls = {
-            r.policy_id: set(r.matched_controls)
-            for r in pol_results
-        }
+        # ── Build control → policies map (ALL coverage types) ────────────────
+        ctrl_to_pols = {}
+        for r in ctrl_results:
+            pol_ids = set(
+                m.policy_id for m in r.matches
+                if m.coverage in ("FULL", "PARTIAL", "INDIRECT")
+            )
+            if pol_ids:
+                ctrl_to_pols[r.control_id] = pol_ids
+
+        # ── Build policy → controls map (ALL coverage types) ─────────────────
+        # Re-derive from ctrl_to_pols so it's consistent (not from reverse pass
+        # which used a different threshold)
+        pol_to_ctrls = {}
+        for ctrl_id, pol_ids in ctrl_to_pols.items():
+            for pid in pol_ids:
+                pol_to_ctrls.setdefault(pid, set()).add(ctrl_id)
 
         one_to_one   = []
         one_to_many  = []
         many_to_one  = []
         many_to_many = []
-        seen_ctrls   = set()
-        seen_pols    = set()
+        seen_m2m_clusters = set()
+        # Track policies already classified as many_to_one to avoid duplicates
+        seen_m2o_policies = set()
 
         for ctrl_id, pol_ids in ctrl_to_pols.items():
-            if not pol_ids:
-                continue
-            # How many controls map to each of these policies?
-            reverse_counts = {pid: len(pol_to_ctrls.get(pid, set())) for pid in pol_ids}
-            multi_reverse  = [pid for pid, cnt in reverse_counts.items() if cnt > 1]
+            n_pols = len(pol_ids)
 
-            if len(pol_ids) == 1:
-                pid = list(pol_ids)[0]
-                if reverse_counts[pid] == 1:
-                    one_to_one.append({"control": ctrl_id, "policy": pid})
-                else:
-                    many_to_one.append({
-                        "policy": pid,
-                        "controls": list(pol_to_ctrls.get(pid, set()))
+            if n_pols == 1:
+                # ── This control maps to exactly 1 policy ─────────────────────
+                pid = next(iter(pol_ids))
+                n_ctrls_for_this_pol = len(pol_to_ctrls.get(pid, set()))
+
+                if n_ctrls_for_this_pol == 1:
+                    # 1 control ↔ 1 policy
+                    one_to_one.append({
+                        "control": ctrl_id,
+                        "policy":  pid,
                     })
-            else:  # one control → many policies
-                if multi_reverse:
-                    # some of those policies are also hit by other controls → many:many
-                    all_controls = set([ctrl_id])
-                    for pid in pol_ids:
-                        all_controls.update(pol_to_ctrls.get(pid, set()))
-                    cluster_key = frozenset(all_controls)
-                    if cluster_key not in seen_ctrls:
-                        seen_ctrls.add(cluster_key)
+                else:
+                    # Multiple controls → same 1 policy (many-to-1)
+                    if pid not in seen_m2o_policies:
+                        seen_m2o_policies.add(pid)
+                        many_to_one.append({
+                            "policy":   pid,
+                            "controls": sorted(pol_to_ctrls[pid]),
+                        })
+
+            else:
+                # ── This control maps to 2+ policies ─────────────────────────
+                # Check if any of those policies are ALSO hit by other controls
+                other_controls_exist = any(
+                    len(pol_to_ctrls.get(pid, set())) > 1
+                    for pid in pol_ids
+                )
+
+                if other_controls_exist:
+                    # Overlapping cluster → many-to-many
+                    # Expand cluster to its maximal connected set
+                    cluster_ctrls = set([ctrl_id])
+                    cluster_pols  = set(pol_ids)
+                    # Keep expanding until stable
+                    prev_size = 0
+                    while prev_size != len(cluster_ctrls) + len(cluster_pols):
+                        prev_size = len(cluster_ctrls) + len(cluster_pols)
+                        for pid in list(cluster_pols):
+                            cluster_ctrls.update(pol_to_ctrls.get(pid, set()))
+                        for cid in list(cluster_ctrls):
+                            cluster_pols.update(ctrl_to_pols.get(cid, set()))
+
+                    # Use frozenset of controls as dedup key
+                    cluster_key = frozenset(cluster_ctrls)
+                    if cluster_key not in seen_m2m_clusters:
+                        seen_m2m_clusters.add(cluster_key)
                         many_to_many.append({
-                            "controls": list(all_controls),
-                            "policies": list(pol_ids),
+                            "controls": sorted(cluster_ctrls),
+                            "policies": sorted(cluster_pols),
                         })
                 else:
+                    # Only this control hits these policies → genuine 1-to-many
                     one_to_many.append({
-                        "control": ctrl_id,
-                        "policies": list(pol_ids)
+                        "control":  ctrl_id,
+                        "policies": sorted(pol_ids),
                     })
 
         return {
