@@ -97,7 +97,8 @@ class ControlLoader:
     @staticmethod
     def from_csv(path: str) -> list[Control]:
         controls = []
-        with open(path, "r", encoding="utf-8") as f:
+        # utf-8-sig automatically strips BOM added by Excel when saving as CSV
+        with open(path, "r", encoding="utf-8-sig") as f:
             reader = csv.DictReader(f)
             # Detect ID column name once from headers
             id_col = None
@@ -190,7 +191,8 @@ class PolicyLoader:
     @staticmethod
     def from_csv(path: str, app_filter: Optional[str] = None) -> list[Policy]:
         policies = []
-        with open(path, "r", encoding="utf-8") as f:
+        # utf-8-sig automatically strips BOM added by Excel when saving as CSV
+        with open(path, "r", encoding="utf-8-sig") as f:
             reader = csv.DictReader(f)
             # Detect once from headers
             fieldnames_lower = [f.strip().lower() for f in (reader.fieldnames or [])]
