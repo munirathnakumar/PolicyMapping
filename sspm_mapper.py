@@ -47,6 +47,7 @@ class Policy:
     policy_name:  str
     category:     str = ""     # vendor category if available (not framework)
     description:  str = ""     # vendor description if available
+    impact:       str = ""     # impact level or description from policy file
 
 @dataclass
 class PolicyMatch:
@@ -56,6 +57,7 @@ class PolicyMatch:
     policy_category:  str
     similarity_score: float
     coverage:         str      # FULL / PARTIAL / INDIRECT
+    impact:           str = "" # impact value carried from policy file
 
 @dataclass
 class ControlResult:
@@ -67,7 +69,7 @@ class ControlResult:
     subdomain:     str
     risk_level:    str
     matches:       list = field(default_factory=list)   # list of PolicyMatch
-    is_covered:    bool = False   # True if at least one FULL or PARTIAL match
+    is_covered:    bool = False   # True if at least one FULL, PARTIAL or INDIRECT match
 
 @dataclass
 class PolicyResult:
@@ -186,6 +188,8 @@ class PolicyLoader:
                     policy_name = name,
                     category    = row.get("category", row.get("type", "")),
                     description = row.get("description", row.get("desc", "")),
+                    impact      = row.get("impact", row.get("impact_level",
+                                  row.get("severity", row.get("priority", "")))),
                 ))
         return policies
 
@@ -221,6 +225,8 @@ class PolicyLoader:
                     policy_name = item.get("policy_name", item.get("policy", item.get("name", ""))),
                     category    = item.get("category", ""),
                     description = item.get("description", ""),
+                    impact      = item.get("impact", item.get("impact_level",
+                                  item.get("severity", item.get("priority", "")))),
                 ))
         return [p for p in policies if p.policy_name]
 
@@ -289,7 +295,6 @@ class SecBERTEncoder:
         embeddings = []
         with torch.no_grad():
             for text in texts:
-                # Use policy_name + description as encoding text
                 inputs  = self.tokenizer(
                     text, return_tensors="pt",
                     truncation=True, max_length=256, padding=True)
@@ -297,7 +302,10 @@ class SecBERTEncoder:
                 hidden  = outputs.last_hidden_state
                 mask    = inputs["attention_mask"].unsqueeze(-1).float()
                 pooled  = (hidden * mask).sum(1) / mask.sum(1)
-                embeddings.append(pooled.squeeze().numpy())
+                # reshape(-1) guarantees 1D vector regardless of batch size
+                # squeeze() can collapse dimensions incorrectly for single tokens
+                vec = pooled.squeeze(0).reshape(-1).numpy()
+                embeddings.append(vec)
         return np.array(embeddings)
 
 
@@ -456,6 +464,18 @@ class SSPMMapper:
 
         # ── Build similarity matrix ───────────────────────────────────────────
         # Shape: (n_controls, n_policies)
+        # Ensure both matrices are 2D before matrix multiply
+        ctrl_vecs   = np.atleast_2d(ctrl_vecs)
+        policy_vecs = np.atleast_2d(policy_vecs)
+
+        # Ensure same embedding dimension
+        if ctrl_vecs.shape[1] != policy_vecs.shape[1]:
+            raise RuntimeError(
+                f"Embedding dimension mismatch: controls={ctrl_vecs.shape[1]} "
+                f"vs policies={policy_vecs.shape[1]}. "
+                f"Clear policy_cache/ and re-run."
+            )
+
         def norm(vecs):
             norms = np.linalg.norm(vecs, axis=1, keepdims=True) + 1e-9
             return vecs / norms
@@ -489,10 +509,11 @@ class SSPMMapper:
                     policy_category  = pol.category,
                     similarity_score = round(score, 4),
                     coverage         = coverage,
+                    impact           = pol.impact,
                 ))
                 matched_policy_ids.add(pol.policy_id)
 
-            is_covered = any(m.coverage in ("FULL", "PARTIAL") for m in matches)
+            is_covered = any(m.coverage in ("FULL", "PARTIAL", "INDIRECT") for m in matches)
 
             control_results.append(ControlResult(
                 control_id   = ctrl.control_id,
@@ -514,7 +535,7 @@ class SSPMMapper:
 
             for i, ctrl in enumerate(self.controls):
                 score = float(sims[i])
-                if score >= THRESHOLD_PARTIAL:
+                if score >= THRESHOLD_INDIRECT:
                     matched_ctrl_ids.append(ctrl.control_id)
 
             is_orphan = len(matched_ctrl_ids) == 0
@@ -661,29 +682,45 @@ class SSPMMapper:
         for r in ctrl_results:
             d = domains[r.domain]
             d["total"] += 1
+            # Covered = any match (FULL, PARTIAL, or INDIRECT)
             if r.is_covered:
                 d["covered"] += 1
             else:
                 d["uncovered"].append(r.control_id)
+            # Track coverage breakdown
+            for m in r.matches:
+                d[m["coverage"] if isinstance(m, dict) else m.coverage] =                     d.get(m["coverage"] if isinstance(m, dict) else m.coverage, 0) + 1
             if r.risk_level == "HIGH":
                 d["high_risk"] += 1
 
         summary = []
         for domain, stats in sorted(domains.items()):
-            pct = round(stats["covered"] / stats["total"] * 100) if stats["total"] else 0
+            total    = stats["total"]
+            covered  = stats["covered"]
+            pct      = round(covered / total * 100) if total else 0
+            n_full     = stats.get("FULL", 0)
+            n_partial  = stats.get("PARTIAL", 0)
+            n_indirect = stats.get("INDIRECT", 0)
             summary.append({
-                "domain":              domain,
-                "total_controls":      stats["total"],
-                "covered_controls":    stats["covered"],
-                "uncovered_controls":  stats["total"] - stats["covered"],
-                "coverage_pct":        pct,
-                "high_risk_controls":  stats["high_risk"],
+                "domain":               domain,
+                "total_controls":       total,
+                "covered_controls":     covered,
+                "uncovered_controls":   total - covered,
+                "coverage_pct":         pct,
+                "full_matches":         n_full,
+                "partial_matches":      n_partial,
+                "indirect_matches":     n_indirect,
+                "high_risk_controls":   stats["high_risk"],
                 "uncovered_control_ids": stats["uncovered"],
-                "coverage_status":    (
+                "coverage_status":     (
                     "FULL"    if pct == 100 else
                     "GOOD"    if pct >= 75  else
                     "PARTIAL" if pct >= 50  else
                     "POOR"
+                ),
+                "coverage_note": (
+                    "Includes INDIRECT matches in coverage %" 
+                    if n_indirect > 0 else ""
                 ),
             })
         return summary
@@ -716,6 +753,7 @@ class SSPMMapper:
                     "policy_category":  m.policy_category,
                     "similarity_score": m.similarity_score,
                     "coverage":         m.coverage,
+                    "impact":           m.impact,
                 }
                 for m in r.matches
             ],
@@ -747,9 +785,10 @@ class SSPMMapper:
         print(f"  Covered     : {GRN}{s['covered_controls']}{R}   "
               f"Uncovered : {RED}{s['uncovered_controls']}{R}   "
               f"Orphan policies : {YEL}{s['orphan_policies']}{R}")
-        print(f"  FULL matches: {GRN}{s['full_matches']}{R}   "
-              f"PARTIAL: {YEL}{s['partial_matches']}{R}   "
-              f"INDIRECT: {DIM}{s['indirect_matches']}{R}")
+        print(f"  FULL        : {GRN}{s['full_matches']}{R}   "
+              f"PARTIAL : {YEL}{s['partial_matches']}{R}   "
+              f"INDIRECT : {DIM}{s['indirect_matches']}{R}   "
+              f"{DIM}(all 3 count toward coverage %){R}")
 
         # ── Domain Summary ────────────────────────────────────────────────────
         print(f"\n{'─'*70}")
@@ -760,10 +799,15 @@ class SSPMMapper:
             bar_len = int(d["coverage_pct"] / 5)
             bar = "█"*bar_len + "░"*(20-bar_len)
             col = sc.get(d["coverage_status"], R)
-            hr  = f"  {RED}⚠ {d['high_risk_controls']} HIGH risk{R}" if d["high_risk_controls"] else ""
+            hr  = f"  {RED}⚠ {d['high_risk_controls']} HIGH{R}" if d["high_risk_controls"] else ""
+            # Show breakdown: F=FULL P=PARTIAL I=INDIRECT
+            breakdown = (f"{GRN}F:{d.get('full_matches',0)}{R} "
+                         f"{YEL}P:{d.get('partial_matches',0)}{R} "
+                         f"{DIM}I:{d.get('indirect_matches',0)}{R}")
             print(f"  {B}{d['domain']:<28}{R} "
                   f"{col}{bar}{R} {d['coverage_pct']:>3}%  "
-                  f"({d['covered_controls']}/{d['total_controls']}){hr}")
+                  f"({d['covered_controls']}/{d['total_controls']})  "
+                  f"{breakdown}{hr}")
 
         # ── Relationship types ────────────────────────────────────────────────
         rel = report["relationships"]
@@ -959,30 +1003,58 @@ class SSPMMapper:
         # Domain summary table
         start_row = 14
         ws1.cell(row=start_row, column=1,
-                 value="Domain Coverage").font = hdr_font(size=11, color="1F3864")
+                 value="Domain Coverage  (Coverage % includes FULL + PARTIAL + INDIRECT)").font = hdr_font(size=11, color="1F3864")
         ws1.cell(row=start_row, column=1).fill = fill(C_HEADER_LIGHT)
-        ws1.merge_cells(start_row=start_row, start_column=1,
-                        end_row=start_row, end_column=6)
 
-        hdr = ["Domain", "Total", "Covered", "Uncovered", "Coverage %", "Status"]
+        hdr = ["Domain", "Total", "Covered", "Uncovered",
+               "Coverage %", "FULL", "PARTIAL", "INDIRECT", "Status", "Note"]
         write_header_row(ws1, start_row + 1, hdr)
         sc_map = {"FULL":"C6EFCE","GOOD":"C6EFCE","PARTIAL":"FFEB9C","POOR":"FFC7CE"}
         for i, d in enumerate(report["domain_summary"]):
             r = start_row + 2 + i
-            vals = [d["domain"], d["total_controls"], d["covered_controls"],
-                    d["uncovered_controls"], d["coverage_pct"] / 100, d["coverage_status"]]
+            vals = [
+                d["domain"],
+                d["total_controls"],
+                d["covered_controls"],
+                d["uncovered_controls"],
+                d["coverage_pct"] / 100,
+                d.get("full_matches", 0),
+                d.get("partial_matches", 0),
+                d.get("indirect_matches", 0),
+                d["coverage_status"],
+                d.get("coverage_note", ""),
+            ]
             write_data_row(ws1, r, vals, alt=(i % 2 == 1))
-            # colour status cell
-            sc = ws1.cell(row=r, column=6)
+            # Status cell colour
+            sc = ws1.cell(row=r, column=9)
             bg = sc_map.get(d["coverage_status"], "FFFFFF")
             sc.fill = fill(bg)
             sc.font = body_font(bold=True)
-            # percentage format
+            # Percentage format
             ws1.cell(row=r, column=5).number_format = "0%"
+            # Colour FULL cell green
+            fc = ws1.cell(row=r, column=6)
+            if d.get("full_matches", 0) > 0:
+                fc.fill = fill("C6EFCE")
+                fc.font = body_font(bold=True, color="276221")
+            # Colour PARTIAL amber
+            pc = ws1.cell(row=r, column=7)
+            if d.get("partial_matches", 0) > 0:
+                pc.fill = fill("FFEB9C")
+                pc.font = body_font(bold=True, color="9C5700")
+            # Colour INDIRECT grey
+            ic = ws1.cell(row=r, column=8)
+            if d.get("indirect_matches", 0) > 0:
+                ic.fill = fill("EDEDED")
+                ic.font = body_font(bold=True, color="595959")
 
-        set_col_widths(ws1, {"A":30,"B":10,"C":10,"D":12,"E":13,"F":12})
+        set_col_widths(ws1, {"A":30,"B":8,"C":10,"D":12,
+                              "E":12,"F":8,"G":10,"H":11,"I":12,"J":38})
         ws1.column_dimensions["A"].width = 30
         freeze(ws1, "A2")
+        # Extend domain section merge to 10 cols
+        ws1.merge_cells(start_row=start_row, start_column=1,
+                        end_row=start_row, end_column=10)
 
         # ═══════════════════════════════════════════════════════════════════════
         # SHEET 2 — Control Mappings
@@ -991,7 +1063,7 @@ class SSPMMapper:
         title_row(ws2, f"Control → Policy Mappings  |  {app}", 14)
         hdrs = ["Control ID","Control Text","Domain","Framework","Subdomain",
                 "Risk Level","Is Covered","Policy ID","Policy Name",
-                "Policy Category","Similarity Score","Coverage","Relevance"]
+                "Policy Category","Impact","Similarity Score","Coverage","Relevance"]
         write_header_row(ws2, 2, hdrs)
         freeze(ws2, "A3")
 
@@ -1006,10 +1078,11 @@ class SSPMMapper:
                             cm["risk_level"], "Yes" if cm["is_covered"] else "No",
                             m["policy_id"], m["policy_name"],
                             m.get("policy_category",""),
+                            m.get("impact",""),
                             m["similarity_score"], m["coverage"], relevance]
                     write_data_row(ws2, row, vals, alt=(row % 2 == 0))
-                    # Coverage colour
-                    cov_cell = ws2.cell(row=row, column=12)
+                    # Coverage colour — now column 13 (impact added)
+                    cov_cell = ws2.cell(row=row, column=13)
                     if m["coverage"] == "FULL":
                         color_cell(cov_cell, C_FULL, C_FULL_FG)
                     elif m["coverage"] == "PARTIAL":
@@ -1040,8 +1113,8 @@ class SSPMMapper:
                 row += 1
 
         set_col_widths(ws2, {"A":12,"B":45,"C":20,"D":12,"E":12,"F":11,
-                              "G":11,"H":10,"I":40,"J":18,"K":14,"L":12,"M":11})
-        ws2.auto_filter.ref = f"A2:M{row-1}"
+                              "G":11,"H":10,"I":40,"J":18,"K":15,"L":14,"M":12,"N":11})
+        ws2.auto_filter.ref = f"A2:N{row-1}"
 
         # ═══════════════════════════════════════════════════════════════════════
         # SHEET 3 — Policy Mappings
@@ -1193,11 +1266,245 @@ class SSPMMapper:
 
         set_col_widths(ws6, {"A":25,"B":55,"C":12})
 
+        # ═══════════════════════════════════════════════════════════════════════
+        # SHEET 7 — One-to-Many (controls that map to multiple policies)
+        # ═══════════════════════════════════════════════════════════════════════
+        ws7 = wb.create_sheet("One-to-Many")
+        title_row(ws7, f"One Control → Multiple Policies  |  {app}", 6)
+        write_header_row(ws7, 2,
+            ["Control ID", "Control Text", "Domain", "Framework",
+             "Policy ID", "Policy Name", "Policy Category", "Impact",
+             "Similarity Score", "Coverage", "Match Rank"])
+        freeze(ws7, "A3")
+
+        row = 3
+        # Only controls that matched MORE than one policy
+        multi_match = [cm for cm in report["control_mappings"] if len(cm["matches"]) > 1]
+        for cm in multi_match:
+            for rank, m in enumerate(cm["matches"], 1):
+                relevance = ("HIGH"   if m["similarity_score"] >= 0.82 else
+                             "MEDIUM" if m["similarity_score"] >= 0.60 else "LOW")
+                vals = [
+                    cm["control_id"],
+                    cm["control_text"],
+                    cm["domain"],
+                    cm["framework"],
+                    m["policy_id"],
+                    m["policy_name"],
+                    m.get("policy_category", ""),
+                    m.get("impact", ""),
+                    m["similarity_score"],
+                    m["coverage"],
+                    f"#{rank}",
+                ]
+                write_data_row(ws7, row, vals, alt=(row % 2 == 0))
+                # Coverage colour — now column 10 (impact added)
+                cov_cell = ws7.cell(row=row, column=10)
+                if m["coverage"] == "FULL":
+                    color_cell(cov_cell, C_FULL, C_FULL_FG)
+                elif m["coverage"] == "PARTIAL":
+                    color_cell(cov_cell, C_PARTIAL, C_PARTIAL_FG)
+                else:
+                    color_cell(cov_cell, C_INDIRECT, C_INDIRECT_FG)
+                ws7.cell(row=row, column=8).number_format = "0.0000"
+                row += 1
+            # Blank separator row between controls
+            row += 1
+
+        if not multi_match:
+            ws7.cell(row=3, column=1,
+                     value="No controls matched more than one policy.").font = body_font(color="595959")
+
+        set_col_widths(ws7, {"A":12,"B":45,"C":22,"D":12,
+                              "E":12,"F":40,"G":18,"H":15,"I":14,"J":12,"K":10})
+        ws7.auto_filter.ref = f"A2:K{max(row-1, 3)}"
+
+        # ═══════════════════════════════════════════════════════════════════════
+        # SHEET 8 — Mind Map (text-based tree layout in Excel)
+        # ═══════════════════════════════════════════════════════════════════════
+        ws8 = wb.create_sheet("Mind Map")
+        title_row(ws8, f"Control → Policy Mind Map  |  {app}", 8)
+
+        # Colour palette for mind map levels
+        C_DOMAIN    = "1F3864"   # navy   — domain root
+        C_DOMAIN_FG = "FFFFFF"
+        C_CONTROL   = "2E75B6"   # blue   — control node
+        C_CTRL_FG   = "FFFFFF"
+        C_FULL_N    = "375623"   # dark green — FULL match node
+        C_FULL_NFG  = "FFFFFF"
+        C_PART_N    = "7F6000"   # dark amber — PARTIAL match node
+        C_PART_NFG  = "FFFFFF"
+        C_IND_N     = "595959"   # grey — INDIRECT node
+        C_IND_NFG   = "FFFFFF"
+        C_UNMAP     = "843C0C"   # red-brown — unmapped
+        C_UNMAP_FG  = "FFFFFF"
+
+        # Column layout:
+        # A        = Domain
+        # B        = Control ID
+        # C        = Control Text (truncated)
+        # D        = connector arrow
+        # E        = Policy ID
+        # F        = Policy Name
+        # G        = Coverage badge
+
+        # Header row — 8 columns now (added Impact)
+        # Col: A=indent  B=ControlID  C=ControlText  D=arrow
+        #      E=PolicyID  F=PolicyName  G=Coverage  H=Impact
+        mm_hdrs = ["", "Control ID", "Control Text",
+                   "", "Policy ID", "Policy Name", "Coverage", "Impact"]
+        write_header_row(ws8, 2, mm_hdrs, bg=C_HEADER_DARK, fg="FFFFFF")
+        ws8.row_dimensions[2].height = 20
+
+        # Group controls by domain
+        from collections import defaultdict
+        domain_map = defaultdict(list)
+        for cm in report["control_mappings"]:
+            domain_map[cm["domain"]].append(cm)
+
+        mm_row = 3
+        for domain, controls in sorted(domain_map.items()):
+            # Domain header row — spans all columns
+            ws8.merge_cells(start_row=mm_row, start_column=1,
+                            end_row=mm_row, end_column=8)
+            dc = ws8.cell(row=mm_row, column=1,
+                          value=f"▶  {domain.upper()}")
+            dc.font      = Font(name="Arial", size=11, bold=True, color=C_DOMAIN_FG)
+            dc.fill      = fill(C_DOMAIN)
+            dc.alignment = Alignment(horizontal="left", vertical="center",
+                                     indent=1)
+            ws8.row_dimensions[mm_row].height = 22
+            mm_row += 1
+
+            for cm in controls:
+                n_matches = len(cm["matches"])
+
+                if n_matches == 0:
+                    # Unmapped control — single row
+                    ws8.cell(row=mm_row, column=1, value="")
+                    ctrl_id_cell = ws8.cell(row=mm_row, column=2,
+                                            value=cm["control_id"])
+                    ctrl_id_cell.font = Font(name="Arial", size=10,
+                                             bold=True, color=C_UNMAP_FG)
+                    ctrl_id_cell.fill = fill(C_UNMAP)
+                    ctrl_id_cell.alignment = wrap_align("center")
+
+                    ctrl_txt = ws8.cell(row=mm_row, column=3,
+                                        value=cm["control_text"][:80])
+                    ctrl_txt.font = body_font(color=C_UNMAP)
+                    ctrl_txt.alignment = wrap_align()
+
+                    ws8.cell(row=mm_row, column=4, value="✘ NO MATCH").font =                         Font(name="Arial", size=10, bold=True, color=C_UNMAP)
+                    mm_row += 1
+
+                else:
+                    # One row per matched policy
+                    for idx, m in enumerate(cm["matches"]):
+                        # Control ID + text only on first match row
+                        if idx == 0:
+                            ctrl_id_cell = ws8.cell(row=mm_row, column=2,
+                                                    value=cm["control_id"])
+                            ctrl_id_cell.font      = Font(name="Arial", size=10,
+                                                          bold=True, color=C_CTRL_FG)
+                            ctrl_id_cell.fill      = fill(C_CONTROL)
+                            ctrl_id_cell.alignment = wrap_align("center")
+
+                            ctrl_txt = ws8.cell(row=mm_row, column=3,
+                                                value=cm["control_text"][:80])
+                            ctrl_txt.font      = body_font(bold=True)
+                            ctrl_txt.alignment = wrap_align()
+
+                            # Merge control text cell vertically if multiple matches
+                            if n_matches > 1:
+                                try:
+                                    ws8.merge_cells(
+                                        start_row=mm_row, start_column=2,
+                                        end_row=mm_row + n_matches - 1,
+                                        end_column=2)
+                                    ws8.merge_cells(
+                                        start_row=mm_row, start_column=3,
+                                        end_row=mm_row + n_matches - 1,
+                                        end_column=3)
+                                except Exception:
+                                    pass  # skip merge errors
+
+                        # Connector arrow
+                        arrow = ws8.cell(row=mm_row, column=4,
+                                         value="──►" if idx == 0 else "   ►")
+                        arrow.font      = Font(name="Arial", size=10, color="2E75B6")
+                        arrow.alignment = Alignment(horizontal="center",
+                                                    vertical="center")
+
+                        # Policy ID
+                        pol_id_cell = ws8.cell(row=mm_row, column=5,
+                                               value=m["policy_id"])
+                        pol_id_cell.font      = body_font(bold=True)
+                        pol_id_cell.alignment = wrap_align("center")
+
+                        # Policy name
+                        pol_name_cell = ws8.cell(row=mm_row, column=6,
+                                                 value=m["policy_name"])
+                        pol_name_cell.font      = body_font()
+                        pol_name_cell.alignment = wrap_align()
+
+                        # Coverage badge
+                        cov_val = m["coverage"]
+                        cov_cell = ws8.cell(row=mm_row, column=7, value=cov_val)
+                        if cov_val == "FULL":
+                            color_cell(cov_cell, C_FULL_N, C_FULL_NFG)
+                        elif cov_val == "PARTIAL":
+                            color_cell(cov_cell, C_PART_N, C_PART_NFG)
+                        else:
+                            color_cell(cov_cell, C_IND_N, C_IND_NFG)
+                        cov_cell.alignment = Alignment(horizontal="center",
+                                                       vertical="center")
+
+                        # Impact cell — col 8
+                        impact_val = m.get("impact", "")
+                        imp_cell = ws8.cell(row=mm_row, column=8, value=impact_val)
+                        imp_cell.font      = body_font(bold=bool(impact_val))
+                        imp_cell.alignment = Alignment(horizontal="center",
+                                                       vertical="center")
+                        # Colour impact by severity if value present
+                        if impact_val:
+                            iv = impact_val.upper()
+                            if any(x in iv for x in ("HIGH","CRITICAL","SEVERE")):
+                                imp_cell.fill = fill(C_HIGH)
+                                imp_cell.font = Font(name="Arial", size=10,
+                                                     bold=True, color=C_HIGH_FG)
+                            elif any(x in iv for x in ("MEDIUM","MODERATE")):
+                                imp_cell.fill = fill(C_MEDIUM)
+                                imp_cell.font = Font(name="Arial", size=10,
+                                                     bold=True, color=C_MEDIUM_FG)
+                            elif any(x in iv for x in ("LOW","MINOR","INFO")):
+                                imp_cell.fill = fill(C_LOW)
+                                imp_cell.font = Font(name="Arial", size=10,
+                                                     bold=True, color=C_LOW_FG)
+
+                        # Alt row shading for non-coloured cells
+                        for col in [1, 4, 5, 6]:
+                            c = ws8.cell(row=mm_row, column=col)
+                            if not c.value:
+                                c.fill = fill(C_ALT_ROW if mm_row % 2 == 0
+                                              else "FFFFFF")
+                            c.border = border
+
+                        ws8.row_dimensions[mm_row].height = 18
+                        mm_row += 1
+
+            # Spacer between domains
+            mm_row += 1
+
+        set_col_widths(ws8, {"A":3, "B":13, "C":42,
+                              "D":6, "E":13, "F":42, "G":11, "H":14})
+        ws8.freeze_panes = "A3"
+
         # ── Save ──────────────────────────────────────────────────────────────
         wb.save(path)
         print(f"📊  Excel report saved to {path}")
         print(f"     Sheets: Summary | Control Mappings | Policy Mappings |")
-        print(f"             Uncovered Controls | Orphan Policies | Relationships")
+        print(f"             Uncovered Controls | Orphan Policies | Relationships |")
+        print(f"             One-to-Many | Mind Map")
 
 
     def save_csv(self, report: dict, prefix: str = "mapping"):
@@ -1376,7 +1683,11 @@ class SSPMMapper:
                 "covered_controls",
                 "uncovered_controls",
                 "coverage_pct",
+                "full_matches",
+                "partial_matches",
+                "indirect_matches",
                 "coverage_status",
+                "coverage_note",
                 "high_risk_controls",
                 "uncovered_control_ids",
             ])
@@ -1388,7 +1699,11 @@ class SSPMMapper:
                     d["covered_controls"],
                     d["uncovered_controls"],
                     d["coverage_pct"],
+                    d.get("full_matches", 0),
+                    d.get("partial_matches", 0),
+                    d.get("indirect_matches", 0),
                     d["coverage_status"],
+                    d.get("coverage_note", ""),
                     d["high_risk_controls"],
                     ", ".join(d.get("uncovered_control_ids", [])),
                 ])
@@ -1458,10 +1773,28 @@ def generate_sample_data():
         ["POL-020","Restrict third-party OAuth app permissions","Access Control","Require admin consent for third-party apps requesting Microsoft 365 permissions"],
     ]
 
+    # Add impact column to sample policies
+    policies_with_impact = []
+    impact_map = {
+        "Identity":         "HIGH",
+        "Access Control":   "HIGH",
+        "Data Protection":  "HIGH",
+        "Logging":          "MEDIUM",
+        "Compliance":       "MEDIUM",
+        "Session":          "MEDIUM",
+        "Threat Detection": "HIGH",
+        "Threat Protection":"HIGH",
+        "Governance":       "LOW",
+    }
+    for p in policies:
+        cat = p[2]
+        impact = impact_map.get(cat, "MEDIUM")
+        policies_with_impact.append(p + [impact])
+
     with open("sample_policies_m365.csv","w",newline="",encoding="utf-8") as f:
         w = csv.writer(f)
-        w.writerow(["policy_id","policy_name","category","description"])
-        w.writerows(policies)
+        w.writerow(["policy_id","policy_name","category","description","impact"])
+        w.writerows(policies_with_impact)
 
     print("📄  Generated sample_controls.csv      (18 controls, 6 domains)")
     print("📄  Generated sample_policies_m365.csv (20 policies, Microsoft 365)\n")
@@ -1469,85 +1802,133 @@ def generate_sample_data():
 
 # ── Main ──────────────────────────────────────────────────────────────────────
 
+def parse_args():
+    """
+    Parse command line arguments.
+
+    Usage:
+      python sspm_mapper.py \
+        --controls  your_controls.csv \
+        --policies  your_policies.csv \
+        --app       "Microsoft 365"   \
+        --out       my_report         \
+        --verbose
+
+    All arguments are optional — defaults to sample data.
+    """
+    import argparse
+    p = argparse.ArgumentParser(
+        description="SSPM Policy Mapper — maps org security controls to OOTB policies",
+        formatter_class=argparse.RawTextHelpFormatter,
+    )
+    p.add_argument("--controls", "-c",
+                   default=None,
+                   help="Path to controls CSV/JSON file\n"
+                        "Columns: control_id, control_text, domain, framework, subdomain")
+    p.add_argument("--policies", "-p",
+                   default=None,
+                   help="Path to OOTB policies CSV/JSON file\n"
+                        "Columns: policy_id, policy_name, category, description")
+    p.add_argument("--app", "-a",
+                   default=None,
+                   help="SaaS application name (used as report title and output prefix)\n"
+                        "Example: --app \"Microsoft 365\"")
+    p.add_argument("--out", "-o",
+                   default=None,
+                   help="Output file prefix (default: derived from app name)\n"
+                        "Example: --out salesforce  →  salesforce_report.xlsx")
+    p.add_argument("--threshold", "-t",
+                   type=float, default=0.40,
+                   help="Minimum similarity score to include a match (default: 0.40)")
+    p.add_argument("--topk", "-k",
+                   type=int, default=5,
+                   help="Max number of policy matches per control (default: 5)")
+    p.add_argument("--verbose", "-v",
+                   action="store_true",
+                   help="Show all control→policy match details in console output")
+    p.add_argument("--model", "-m",
+                   default=None,
+                   help="Path to local SecBERT model folder\n"
+                        "Example: --model ./secbert_clean")
+    return p.parse_args()
+
+
 def main():
     import sys
+    args = parse_args()
+
     print("="*70)
     print("  🛡️  SSPM Policy Mapper v4 — Bidirectional Gap Analysis")
     print("="*70+"\n")
 
-    if not Path("sample_controls.csv").exists():
-        generate_sample_data()
+    # ── Resolve file paths ────────────────────────────────────────────────────
+    # If no files passed → generate and use sample data
+    controls_file = args.controls
+    policies_file = args.policies
 
-    mapper = SSPMMapper()
-    mapper.load_controls("sample_controls.csv")
-    mapper.load_policies("sample_policies_m365.csv", app="Microsoft 365")  # app= is label only for single-app files
+    if not controls_file or not policies_file:
+        if not Path("sample_controls.csv").exists():
+            generate_sample_data()
+        controls_file = controls_file or "sample_controls.csv"
+        policies_file = policies_file or "sample_policies_m365.csv"
+        print(f"ℹ️   No files specified — using sample data.")
+        print(f"     Controls : {controls_file}")
+        print(f"     Policies : {policies_file}\n")
+        print(f"     To use your own files:")
+        print(f"     python sspm_mapper.py --controls your_controls.csv \\")
+        print(f'                           --policies your_policies.csv \\')
+        print(f'                           --app "Your App Name"\n')
 
-    verbose = "--verbose" in sys.argv or "-v" in sys.argv
-    report  = mapper.run()
-    mapper.print_report(report, verbose=verbose)
+    # ── Derive app name ───────────────────────────────────────────────────────
+    # Priority: --app argument > filename stem > "Unknown App"
+    if args.app:
+        app_name = args.app
+    else:
+        # Derive from policy filename: "sample_policies_m365.csv" → "M365"
+        stem = Path(policies_file).stem               # e.g. "sample_policies_m365"
+        stem = stem.replace("sample_policies_", "")   # → "m365"
+        stem = stem.replace("policies_", "")          # → "m365"
+        stem = stem.replace("_policies", "")
+        stem = stem.replace("_", " ").strip()
+        app_name = stem.title() if stem else "Unknown App"
+        print(f"ℹ️   No --app specified — using '{app_name}' derived from filename.")
+        print(f"     Pass --app \"Your App Name\" for a proper title.\n")
 
-    # ── Save JSON (always works, no extra dependencies) ───────────────────────
-    mapper.save_report(report, "mapping_report.json")
+    # ── Derive output prefix ──────────────────────────────────────────────────
+    if args.out:
+        out_prefix = args.out
+    else:
+        out_prefix = app_name.lower().replace(" ", "_").replace("/", "_")
 
-    # ── Save CSV ──────────────────────────────────────────────────────────────
+    print(f"  App     : {app_name}")
+    print(f"  Controls: {controls_file}")
+    print(f"  Policies: {policies_file}")
+    print(f"  Output  : {out_prefix}_report.xlsx\n")
+
+    # ── Run mapper ────────────────────────────────────────────────────────────
+    mapper = SSPMMapper(model_path=args.model)
+    mapper.load_controls(controls_file)
+    mapper.load_policies(policies_file, app=app_name)
+
+    report = mapper.run(top_k=args.topk, threshold=args.threshold)
+    mapper.print_report(report, verbose=args.verbose)
+
+    # ── Save outputs ──────────────────────────────────────────────────────────
+    mapper.save_report(report, f"{out_prefix}_report.json")
+
     try:
-        mapper.save_csv(report, prefix="mapping")
+        mapper.save_csv(report, prefix=out_prefix)
     except Exception as e:
         print(f"⚠️  CSV export failed: {e}")
 
-    # ── Save Excel ────────────────────────────────────────────────────────────
     try:
         import openpyxl
-        mapper.save_xlsx(report, path="mapping_report.xlsx")
+        mapper.save_xlsx(report, path=f"{out_prefix}_report.xlsx")
     except ImportError:
         print("⚠️  Excel export skipped — openpyxl not installed.")
         print("    Run:  pip install openpyxl")
     except Exception as e:
         print(f"⚠️  Excel export failed: {e}")
-
-    print("\nUsage:")
-    print("  python sspm_mapper.py              # standard report")
-    print("  python sspm_mapper.py --verbose    # show all control→policy details")
-    print("  python sspm_mapper.py --help       # show API usage\n")
-
-    if "--help" in sys.argv:
-        print("""
-Library usage:
-─────────────────────────────────────────────────────────────
-from sspm_mapper import SSPMMapper, Control, Policy
-
-mapper = SSPMMapper()
-
-# Load your controls (from file)
-mapper.load_controls("your_controls.csv")
-
-# Load OOTB policies for ONE app at a time
-mapper.load_policies("your_policies.csv", app="Salesforce")
-
-# Run mapping
-report = mapper.run(top_k=5, threshold=0.40)
-
-# Print and/or save
-mapper.print_report(report, verbose=True)
-mapper.save_report(report, "salesforce_report.json")
-
-# Key output sections:
-report["summary"]              # counts
-report["domain_summary"]       # per-domain coverage %
-report["relationships"]        # 1:1, 1:N, N:1, N:N
-report["control_mappings"]     # control → matched policies
-report["policy_mappings"]      # policy → matched controls
-report["uncovered_controls"]   # controls with no policy match
-report["orphan_policies"]      # policies with no control match
-─────────────────────────────────────────────────────────────
-
-Controls CSV columns:
-  control_id, control_text, domain, framework, subdomain, description
-
-Policies CSV :
-  policy_id, policy_name, category, description
-  (+ optional: app_name if file contains multiple apps)
-        """)
 
 if __name__ == "__main__":
     main()
