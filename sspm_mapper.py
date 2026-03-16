@@ -58,6 +58,7 @@ class PolicyMatch:
     similarity_score: float
     coverage:         str      # FULL / PARTIAL / INDIRECT
     impact:           str = "" # impact value carried from policy file
+    confidence:       str = "" # HIGH / MEDIUM / LOW — match confidence flag
 
 @dataclass
 class ControlResult:
@@ -308,7 +309,7 @@ class PolicyLoader:
 #   SECBERT_MODEL_PATH = "/opt/models/secbert"    # absolute path
 #
 # If None → attempts HuggingFace download (requires internet)
-SECBERT_MODEL_PATH = "./secbert_model"   # ← SET THIS TO YOUR FOLDER
+SECBERT_MODEL_PATH = "./secbert_clean"   # ← SET THIS TO YOUR FOLDER
 
 
 def _find_model_path(base_path: str) -> str:
@@ -412,6 +413,21 @@ class SecBERTEncoder:
             self.model.eval()
             self.torch = torch
             self.mode  = "secbert"
+
+            # Use GPU if available — significant speedup for large batches
+            if torch.cuda.is_available():
+                self._device = torch.device("cuda")
+                self.model   = self.model.to(self._device)
+                print(f"⚡  GPU detected — using CUDA for encoding")
+            elif torch.backends.mps.is_available():
+                # Apple Silicon GPU
+                self._device = torch.device("mps")
+                self.model   = self.model.to(self._device)
+                print(f"⚡  Apple Silicon GPU (MPS) detected")
+            else:
+                self._device = torch.device("cpu")
+                print(f"ℹ️   Running on CPU — encoding will take ~30-60s for first run")
+
             print("✅  SecBERT ready.\n")
 
         except FileNotFoundError as e:
@@ -432,23 +448,42 @@ class SecBERTEncoder:
             return self._encode_secbert(texts)
         return self.vectorizer.transform(texts).toarray()
 
-    def _encode_secbert(self, texts: list[str]) -> np.ndarray:
+    def _encode_secbert(self, texts: list[str],
+                        batch_size: int = 32) -> np.ndarray:
+        """
+        Encode texts in batches — far faster than one-at-a-time.
+        batch_size=32 works well on CPU. Increase to 64+ if you have GPU RAM.
+        """
         import torch
-        embeddings = []
+        all_vecs = []
+
         with torch.no_grad():
-            for text in texts:
-                inputs  = self.tokenizer(
-                    text, return_tensors="pt",
-                    truncation=True, max_length=256, padding=True)
+            for start in range(0, len(texts), batch_size):
+                batch = texts[start: start + batch_size]
+
+                # Tokenize entire batch at once — padding to longest in batch
+                inputs = self.tokenizer(
+                    batch,
+                    return_tensors="pt",
+                    truncation=True,
+                    max_length=256,
+                    padding=True,       # pad shorter sequences in batch
+                )
+
+                # Move to GPU if available
+                if hasattr(self, '_device'):
+                    inputs = {k: v.to(self._device) for k, v in inputs.items()}
+
                 outputs = self.model(**inputs)
-                hidden  = outputs.last_hidden_state
+                hidden  = outputs.last_hidden_state          # (B, seq, hidden)
                 mask    = inputs["attention_mask"].unsqueeze(-1).float()
-                pooled  = (hidden * mask).sum(1) / mask.sum(1)
-                # reshape(-1) guarantees 1D vector regardless of batch size
-                # squeeze() can collapse dimensions incorrectly for single tokens
-                vec = pooled.squeeze(0).reshape(-1).numpy()
-                embeddings.append(vec)
-        return np.array(embeddings)
+                pooled  = (hidden * mask).sum(1) / mask.sum(1)  # (B, hidden)
+
+                # Move back to CPU for numpy
+                vecs = pooled.cpu().numpy()                  # (B, hidden)
+                all_vecs.append(vecs)
+
+        return np.vstack(all_vecs)   # (N, hidden)
 
 
 # ── Cache ─────────────────────────────────────────────────────────────────────
@@ -477,15 +512,279 @@ class EmbeddingCache:
 
 # ── Policy Text Builder ───────────────────────────────────────────────────────
 
+# ── Security keyword groups for keyword-boost scoring ────────────────────────
+# Tighter, non-overlapping groups. Each keyword only belongs to one group.
+# Overlap between groups causes false boosts — keep groups distinct.
+# ── Synonym expansion map ────────────────────────────────────────────────────
+# Expands abbreviations/synonyms BEFORE encoding so TF-IDF treats them the same
+# e.g. "MFA" → "MFA multi-factor authentication two-factor"
+# Applied to BOTH control and policy text before vectorisation
+SYNONYM_MAP = {
+    # Authentication
+    r"\bmfa\b":                   "mfa multi-factor authentication two-factor 2fa",
+    r"\b2fa\b":                   "2fa two-factor authentication mfa multi-factor",
+    r"\bsso\b":                   "sso single sign-on saml federation",
+    r"\bsaml\b":                  "saml sso single sign-on federation",
+    r"\boidc\b":                  "oidc openid connect oauth federation",
+    r"\bfido\b":                  "fido fido2 hardware key security key phishing-resistant",
+    r"\bpam\b":                   "pam privileged access management",
+    r"\bpim\b":                   "pim privileged identity management just-in-time",
+    # Access Control
+    r"\brbac\b":                  "rbac role-based access control permission",
+    r"\babac\b":                  "abac attribute-based access control",
+    r"\bjit\b":                   "jit just-in-time access",
+    r"\biam\b":                   "iam identity access management",
+    # Data Protection
+    r"\bdlp\b":                   "dlp data loss prevention sensitive data",
+    r"\bpii\b":                   "pii personally identifiable information sensitive data",
+    r"\bphi\b":                   "phi personal health information sensitive data",
+    r"\bpci\b":                   "pci payment card industry financial data",
+    r"\bgdpr\b":                  "gdpr data protection regulation privacy",
+    r"\bhipaa\b":                 "hipaa health information privacy compliance",
+    # Encryption
+    r"\btls\b":                   "tls transport layer security ssl encrypt",
+    r"\bssl\b":                   "ssl secure sockets layer tls encrypt",
+    r"\baes\b":                   "aes advanced encryption standard encrypt",
+    r"\bkms\b":                   "kms key management service encryption",
+    r"\be2e\b":                   "e2e end-to-end encryption",
+    # Infrastructure
+    r"\bsiem\b":                  "siem security information event management log monitoring",
+    r"\bsoc\b":                   "soc security operations center monitoring",
+    r"\bueba\b":                  "ueba user entity behaviour analytics anomaly detection",
+    r"\bcasb\b":                  "casb cloud access security broker",
+    r"\bcspm\b":                  "cspm cloud security posture management",
+    r"\bsspm\b":                  "sspm saas security posture management",
+    r"\bmdm\b":                   "mdm mobile device management endpoint",
+    r"\bbyod\b":                  "byod bring your own device mobile endpoint",
+    r"\bvpn\b":                   "vpn virtual private network remote access",
+    r"\bscim\b":                  "scim system cross-domain identity management provisioning",
+    # Protocols blocked
+    r"\bsmtp\b":                  "smtp email legacy authentication protocol",
+    r"\bimap\b":                  "imap email legacy authentication protocol",
+    r"\bpop3\b":                  "pop3 email legacy authentication protocol",
+    r"\bntlm\b":                  "ntlm legacy windows authentication protocol",
+    # Frameworks
+    r"\bnist\b":                  "nist cybersecurity framework standard",
+    r"\biso\b":                   "iso international standard",
+    r"\bsox\b":                   "sox sarbanes oxley compliance financial",
+    # Actions
+    r"\bdecommission\b":         "decommission disable remove block",
+    r"\bdeprovision\b":          "deprovision remove revoke disable account",
+    r"\blegacy auth\b":            "legacy authentication basic auth old protocol",
+    r"at rest":                    "at rest storage encryption data stored",
+    r"in transit":                 "in transit network encryption data transmitted",
+    r"step-up":                    "step-up authentication mfa challenge",
+    r"least privilege":            "least privilege minimum access rbac permission",
+    r"zero trust":                 "zero trust verify always access control",
+    r"data residency":             "data residency geographic location region compliance",
+    r"audit trail":                "audit trail log record activity history",
+    r"anomalous":                  "anomalous unusual suspicious behaviour detection",
+}
+
+
+def expand_synonyms(text: str) -> str:
+    """
+    Expand abbreviations and synonyms to improve TF-IDF matching.
+    Applied once — expansions are not re-expanded to avoid chain substitution.
+    """
+    import re
+    result = text.lower()
+    # Collect replacements first, apply all at once to avoid chain-expanding
+    expanded_positions = set()
+    replacements = []
+    for pattern, expansion in SYNONYM_MAP.items():
+        for m in re.finditer(pattern, result, flags=re.IGNORECASE):
+            # Skip if this position was already expanded by a previous pattern
+            if any(m.start() < ep[1] and m.end() > ep[0]
+                   for ep in expanded_positions):
+                continue
+            replacements.append((m.start(), m.end(), expansion))
+            expanded_positions.add((m.start(), m.end()))
+
+    # Apply replacements from end to start to preserve positions
+    replacements.sort(key=lambda x: x[0], reverse=True)
+    for start, end, expansion in replacements:
+        result = result[:start] + expansion + result[end:]
+    return result
+
+
+KEYWORD_GROUPS = {
+    # ── Authentication & Identity ─────────────────────────────────────────────
+    "mfa": [
+        "mfa","multi-factor","two-factor","2fa","step-up","step up auth",
+        "hardware token","fido","fido2","authenticator app","otp",
+        "one-time password","totp","phishing-resistant","passwordless",
+        "security key","verification code","second factor","strong auth",
+        "adaptive auth","risk-based auth","challenge","verify identity"
+    ],
+    "legacy_auth": [
+        "legacy auth","basic auth","smtp auth","imap","pop3","ntlm","kerberos",
+        "disable authentication","block protocol","old protocol","legacy protocol",
+        "deprecated auth","insecure protocol","cleartext","unencrypted auth"
+    ],
+    "sso_federation": [
+        "sso","single sign-on","saml","saml 2.0","federation","idp",
+        "identity provider","conditional access","azure ad","okta","ping",
+        "oidc","openid connect","oauth 2.0","identity federation","centralized auth"
+    ],
+    "password_policy": [
+        "password","passphrase","complexity","rotation","expir","minimum length",
+        "uppercase","special character","credential","password strength",
+        "password reuse","password history","lockout","brute force",
+        "account lockout","failed login","password reset","change password"
+    ],
+    # ── Access & Authorization ────────────────────────────────────────────────
+    "access_control": [
+        "rbac","least privilege","role-based","permission","authoriz",
+        "allowlist","whitelist","ip range","just-in-time","pim","jit",
+        "privilege","entitlement","access restriction","access policy",
+        "access rights","user rights","group policy","access review",
+        "segregation of duties","need to know","zero trust","access management"
+    ],
+    "privileged_access": [
+        "privileged","admin","administrator","root","superuser","elevated",
+        "privileged account","service account","break glass","emergency access",
+        "standing privilege","time-bound","approval workflow","pam",
+        "admin console","admin panel","elevated access"
+    ],
+    "user_lifecycle": [
+        "provisioning","deprovisioning","scim","joiner","mover","leaver",
+        "onboard","offboard","account lifecycle","user management",
+        "account creation","account deletion","access revocation",
+        "terminate access","disable account","role assignment","automate user"
+    ],
+    "session": [
+        "session","timeout","idle","expiry","inactivity","auto-logout",
+        "re-authentication","session duration","session management",
+        "session token","persistent session","remember me","cookie"
+    ],
+    # ── Data Protection ───────────────────────────────────────────────────────
+    "dlp": [
+        "dlp","data loss prevention","sensitive data","pii","phi","pci",
+        "classified","confidential","data exfiltration","information barrier",
+        "personally identifiable","protected health","cardholder data",
+        "sensitive information","data leakage","prevent disclosure",
+        "data classification","information protection","sensitivity label"
+    ],
+    "external_sharing": [
+        "external sharing","public link","anonymous access","guest access",
+        "forwarding","share externally","data transfer","egress",
+        "external user","outside organisation","third party sharing",
+        "public access","open access","unrestricted sharing","outbound"
+    ],
+    "encryption": [
+        "encrypt","tls","ssl","aes","kms","key management","at rest",
+        "in transit","cipher","certificate","https","e2e","end-to-end",
+        "encryption key","encrypted storage","encrypted communication",
+        "transport security","tokenization"
+    ],
+    "data_residency": [
+        "data residency","data sovereignty","geo","region","country",
+        "cross-border","transborder","eu","gdpr transfer","data location",
+        "store data","data centre","regional","local storage"
+    ],
+    # ── Logging & Monitoring ──────────────────────────────────────────────────
+    "audit_logging": [
+        "audit","audit log","audit trail","unified log","log retention",
+        "activity log","siem","log streaming","event log","logging",
+        "log management","centralized logging","log archive","event record",
+        "activity record","retain log","12 month","90 day",
+        "immutable log","tamper-proof","non-repudiation"
+    ],
+    "monitoring_alerting": [
+        "monitor","alert","anomaly","suspicious","detect","threat intel",
+        "impossible travel","behavioural","unusual activity","real-time",
+        "detection","notification","alarm","flag","investigate",
+        "security monitoring","continuous monitoring","event correlation"
+    ],
+    # ── Incident & Threat ─────────────────────────────────────────────────────
+    "incident_response": [
+        "incident","breach","compromise","response","contain","remediat",
+        "session termination","revoke","block user","incident management",
+        "security incident","data breach","intrusion","isolate","quarantine",
+        "recovery","restore","eradicate","post-incident"
+    ],
+    "threat_protection": [
+        "malware","phishing","safe link","safe attachment","anti-spam",
+        "defender","threat protection","sandbox","url scan","antivirus",
+        "anti-malware","zero-day","ransomware","spyware","trojan",
+        "email security","link protection","attachment scanning"
+    ],
+    # ── Integration & Apps ────────────────────────────────────────────────────
+    "third_party": [
+        "third-party","oauth","api access","integration","connector",
+        "app permission","marketplace","connected app","admin consent",
+        "external application","api key","webhook","plugin","add-on",
+        "authorised app","approved app","app review","vendor access"
+    ],
+    # ── Infrastructure ────────────────────────────────────────────────────────
+    "endpoint_device": [
+        "device","endpoint","mdm","mobile","jailbreak","compliance device",
+        "managed device","byod","remote wipe","device management",
+        "intune","device policy","device registration","corporate device"
+    ],
+    "network_security": [
+        "firewall","network","vpn","ip restriction","segmentation",
+        "dmz","ingress","egress","private endpoint","network access",
+        "network policy","subnet","vlan","network zone"
+    ],
+    # ── Compliance & Governance ───────────────────────────────────────────────
+    "compliance_retention": [
+        "compliance","retention","ediscovery","legal hold","gdpr","hipaa",
+        "sox","iso 27001","nist csf","regulatory","data residency",
+        "pci dss","audit requirement","regulatory requirement",
+        "compliance policy","archival","preservation","discovery"
+    ],
+    "governance": [
+        "governance","policy","procedure","standard","framework","review",
+        "approval","accountability","ownership","responsibility",
+        "risk management","security policy","information security"
+    ],
+}
+
+KEYWORD_BOOST    = 0.08   # per matching keyword group (capped at 0.25)
+DOMAIN_BOOST     = 0.05   # when control domain aligns with policy category
+NONSENSE_PENALTY = 0.20   # applied when zero keyword overlap AND base score < 0.55
+
+
+def _keyword_groups_for(text: str) -> set:
+    """Return set of keyword group names that match the text."""
+    t = text.lower()
+    return {grp for grp, kws in KEYWORD_GROUPS.items() if any(k in t for k in kws)}
+
+
+def _domain_category_match(domain: str, category: str) -> bool:
+    """True if control domain and policy category are semantically related."""
+    mapping = {
+        "access control":      ["access control","identity","governance"],
+        "data protection":     ["data protection","compliance","encryption"],
+        "logging & monitoring":["logging","compliance","governance"],
+        "identity management": ["identity","access control","governance"],
+        "incident response":   ["threat detection","threat protection","logging"],
+        "compliance":          ["compliance","governance","data protection"],
+        "cryptography":        ["encryption","data protection"],
+        "network security":    ["network","access control"],
+    }
+    d = domain.lower()
+    c = category.lower()
+    related = mapping.get(d, [])
+    return any(r in c for r in related) or any(r in d for r in [c])
+
+
 def policy_encode_text(policy: Policy) -> str:
     """
-    Build the text to encode for a policy.
-    Uses ONLY vendor-supplied text — name + description + category.
-    No framework tags, no artificial keyword injection.
+    Build rich encoding text for a policy.
+    Synonym-expanded so TF-IDF and SecBERT both get consistent vocabulary.
+    Policy name repeated to up-weight the primary signal.
+    Description and category add depth.
     """
-    parts = [policy.policy_name]
+    parts = []
+    name = expand_synonyms(policy.policy_name) if policy.policy_name else ""
+    if name:
+        parts.append(name)
+        parts.append(name)                        # repeat for emphasis
     if policy.description:
-        parts.append(policy.description)
+        parts.append(expand_synonyms(policy.description))
     if policy.category:
         parts.append(policy.category)
     return " . ".join(parts)
@@ -493,14 +792,86 @@ def policy_encode_text(policy: Policy) -> str:
 
 def control_encode_text(control: Control) -> str:
     """
-    Build the text to encode for a control.
-    Uses control text + description. Domain is NOT added here
-    (domain is metadata, not semantic content for matching).
+    Build rich encoding text for a control.
+    Synonym-expanded so abbreviations align with policy vocabulary.
+    Control text repeated to up-weight it.
+    Description and subdomain add extra signal.
     """
-    parts = [control.control_text]
+    parts = []
+    text = expand_synonyms(control.control_text) if control.control_text else ""
+    if text:
+        parts.append(text)
+        parts.append(text)                         # repeat for emphasis
     if control.description:
-        parts.append(control.description)
+        parts.append(expand_synonyms(control.description))
+    if control.subdomain:
+        parts.append(control.subdomain)
     return " . ".join(parts)
+
+
+def hybrid_score(base_score: float,
+                 ctrl: "Control",
+                 policy: "Policy") -> float:
+    """
+    Compute final match score combining:
+      1. SecBERT cosine similarity (base)
+      2. Keyword group overlap boost  — rewards shared security vocabulary
+      3. Description term overlap     — rewards shared rare security terms
+      4. Domain-category alignment    — rewards structural match
+      5. Nonsense penalty             — suppresses irrelevant matches
+
+    The key insight: if your description has "legacy authentication protocols
+    SMTP IMAP POP3" and the policy says "Block Basic Auth SMTP IMAP POP3",
+    the term overlap will boost the score even if SecBERT embedding missed it.
+    """
+    ctrl_text = (f"{ctrl.control_text} {ctrl.description} "
+                 f"{ctrl.subdomain} {ctrl.domain}").lower()
+    pol_text  = (f"{policy.policy_name} {policy.description} "
+                 f"{policy.category}").lower()
+
+    # ── 1. Keyword group overlap ──────────────────────────────────────────────
+    ctrl_groups = _keyword_groups_for(ctrl_text)
+    pol_groups  = _keyword_groups_for(pol_text)
+    shared_groups = ctrl_groups & pol_groups
+    kw_boost = min(len(shared_groups) * KEYWORD_BOOST, 0.25)
+
+    # ── 2. Description term overlap (Jaccard on meaningful tokens) ────────────
+    # Captures specific technical terms your descriptions contain
+    stop = {"the","a","an","is","are","must","should","will","all","any",
+            "for","to","of","in","and","or","not","be","by","with","that",
+            "this","from","have","has","been","it","its","on","at","as","per"}
+
+    def tokens(text):
+        import re
+        return set(re.findall(r"[a-z0-9][a-z0-9-]{2,}", text)) - stop
+
+    ctrl_tokens = tokens(ctrl_text)
+    pol_tokens  = tokens(pol_text)
+    if ctrl_tokens and pol_tokens:
+        intersection = ctrl_tokens & pol_tokens
+        union        = ctrl_tokens | pol_tokens
+        jaccard      = len(intersection) / len(union)
+        # Boost proportionally — max 0.20 from description overlap
+        desc_boost = min(jaccard * 2.0, 0.20)
+    else:
+        desc_boost = 0.0
+
+    # ── 3. Domain-category alignment ─────────────────────────────────────────
+    dom_boost = DOMAIN_BOOST if _domain_category_match(
+        ctrl.domain, policy.category) else 0.0
+
+    # ── 4. Nonsense penalty ───────────────────────────────────────────────────
+    # If ZERO keyword groups match AND base score is weak → this is likely
+    # a false positive from embedding similarity on generic security words
+    if not shared_groups and base_score < 0.55:
+        penalty = NONSENSE_PENALTY
+    elif not shared_groups and base_score < 0.68:
+        penalty = NONSENSE_PENALTY * 0.5   # lighter penalty for mid-range scores
+    else:
+        penalty = 0.0
+
+    final = base_score + kw_boost + desc_boost + dom_boost - penalty
+    return round(min(max(final, 0.0), 1.0), 4)
 
 
 # ── Core Mapper ───────────────────────────────────────────────────────────────
@@ -600,6 +971,8 @@ class SSPMMapper:
         if not self.policies:
             raise RuntimeError("No policies loaded. Call load_policies() first.")
 
+        import time as _time
+        t_total = _time.time()
         print(f"🔄  Encoding {len(self.controls)} controls and {len(self.policies)} policies...")
 
         # Build encode texts
@@ -610,38 +983,55 @@ class SSPMMapper:
         if self.encoder.mode == "tfidf":
             self.encoder.fit_tfidf(ctrl_texts + policy_texts)
 
-        # Encode — use cache for policies (they don't change per run)
+        # ── Encode policies — cached per app ─────────────────────────────────
         cache_label = self.app_name or "policies"
-        ctrl_vecs   = self.encoder.encode(ctrl_texts)
-
         policy_vecs = self.cache.get(cache_label, policy_texts)
         if policy_vecs is None:
+            print(f"     Encoding {len(policy_texts)} policies in batches...")
+            t0 = __import__("time").time()
             policy_vecs = self.encoder.encode(policy_texts)
+            elapsed = __import__("time").time() - t0
             self.cache.set(cache_label, policy_texts, policy_vecs)
-            print(f"     Policy vectors encoded and cached.")
+            print(f"     Policy vectors encoded in {elapsed:.1f}s and cached.")
         else:
-            print(f"     Policy vectors loaded from cache.")
+            print(f"     Policy vectors loaded from cache (instant).")
 
-        print(f"✅  Encoding complete.\n")
+        # ── Encode controls — also cached ─────────────────────────────────────
+        # Controls change less often than you might think — cache them too
+        ctrl_cache_label = f"controls__{self.app_name or 'default'}"
+        ctrl_vecs = self.cache.get(ctrl_cache_label, ctrl_texts)
+        if ctrl_vecs is None:
+            print(f"     Encoding {len(ctrl_texts)} controls in batches...")
+            t0 = __import__("time").time()
+            ctrl_vecs = self.encoder.encode(ctrl_texts)
+            elapsed = __import__("time").time() - t0
+            self.cache.set(ctrl_cache_label, ctrl_texts, ctrl_vecs)
+            print(f"     Control vectors encoded in {elapsed:.1f}s and cached.")
+        else:
+            print(f"     Control vectors loaded from cache (instant).")
+
+        t_enc = _time.time() - t_total
+        print(f"✅  Encoding complete in {t_enc:.1f}s\n")
 
         # ── Build similarity matrix ───────────────────────────────────────────
         # Shape: (n_controls, n_policies)
-        # Ensure both matrices are 2D before matrix multiply
-        ctrl_vecs   = np.atleast_2d(ctrl_vecs)
-        policy_vecs = np.atleast_2d(policy_vecs)
+        ctrl_vecs   = np.atleast_2d(ctrl_vecs).astype(np.float32)   # float32 = 2x faster
+        policy_vecs = np.atleast_2d(policy_vecs).astype(np.float32)
 
-        # Ensure same embedding dimension
         if ctrl_vecs.shape[1] != policy_vecs.shape[1]:
             raise RuntimeError(
                 f"Embedding dimension mismatch: controls={ctrl_vecs.shape[1]} "
                 f"vs policies={policy_vecs.shape[1]}. "
-                f"Clear policy_cache/ and re-run."
+                f"Clear policy_cache/ and re-run: rm -rf policy_cache/"
             )
 
-        def norm(vecs):
-            norms = np.linalg.norm(vecs, axis=1, keepdims=True) + 1e-9
-            return vecs / norms
+        # Normalise rows to unit length — dot product then equals cosine similarity
+        def norm(vecs: np.ndarray) -> np.ndarray:
+            n = np.linalg.norm(vecs, axis=1, keepdims=True)
+            n[n == 0] = 1e-9          # avoid division by zero
+            return vecs / n
 
+        # Single matrix multiply gives all N×M similarities at once
         sim_matrix = norm(ctrl_vecs) @ norm(policy_vecs).T
         # sim_matrix[i][j] = cosine similarity between control i and policy j
 
@@ -651,13 +1041,40 @@ class SSPMMapper:
         matched_policy_ids = set()
 
         for i, ctrl in enumerate(self.controls):
-            sims    = sim_matrix[i]
-            ranked  = np.argsort(sims)[::-1]
+            raw_sims = sim_matrix[i]
+
+            # ── Apply hybrid scoring ──────────────────────────────────────────
+            # For each policy, boost the raw embedding score with keyword +
+            # domain signals. This dramatically improves match quality when
+            # descriptions contain rich security terminology.
+            boosted_sims = np.array([
+                hybrid_score(float(raw_sims[j]), ctrl, self.policies[j])
+                for j in range(len(self.policies))
+            ])
+
+            ranked  = np.argsort(boosted_sims)[::-1]
             matches = []
 
             for j in ranked[:top_k]:
-                score = float(sims[j])
-                if score < threshold:
+                score     = float(boosted_sims[j])
+                raw_score = float(raw_sims[j])
+
+                # Dynamic threshold: lower it when keyword overlap is strong
+                # This ensures keyword-matched policies are never dropped
+                ctrl_kw_set = _keyword_groups_for(
+                    f"{ctrl.control_text} {ctrl.description}")
+                pol_kw_set  = _keyword_groups_for(
+                    f"{self.policies[j].policy_name} "
+                    f"{self.policies[j].description} "
+                    f"{self.policies[j].category}")
+                shared_count = len(ctrl_kw_set & pol_kw_set)
+                effective_threshold = (
+                    0.15 if shared_count >= 2 else   # strong keyword overlap
+                    0.25 if shared_count == 1 else   # some keyword overlap
+                    threshold                          # no keyword overlap — use default
+                )
+
+                if score < effective_threshold:
                     break
                 coverage = (
                     "FULL"     if score >= THRESHOLD_FULL     else
@@ -665,13 +1082,22 @@ class SSPMMapper:
                     "INDIRECT"
                 )
                 pol = self.policies[j]
+                # Confidence = how well keyword groups align (independent of score)
+                ctrl_text = f"{ctrl.control_text} {ctrl.description}"
+                pol_text  = f"{pol.policy_name} {pol.description} {pol.category}"
+                shared_kw = _keyword_groups_for(ctrl_text) & _keyword_groups_for(pol_text)
+                confidence = ("HIGH"   if len(shared_kw) >= 2 else
+                              "MEDIUM" if len(shared_kw) == 1 else
+                              "LOW")
+
                 matches.append(PolicyMatch(
                     policy_id        = pol.policy_id,
                     policy_name      = pol.policy_name,
                     policy_category  = pol.category,
-                    similarity_score = round(score, 4),
+                    similarity_score = score,
                     coverage         = coverage,
                     impact           = pol.impact,
+                    confidence       = confidence,
                 ))
                 matched_policy_ids.add(pol.policy_id)
 
@@ -921,6 +1347,70 @@ class SSPMMapper:
             })
         return summary
 
+    def explain_match(self, control_id: str, policy_id: str):
+        """
+        Print detailed breakdown of WHY a control-policy pair scored what it did.
+        Use this to understand and debug bad/missing matches.
+
+        Usage:
+            mapper.explain_match("ISO-AC-001", "M365-POL-001")
+        """
+        ctrl = next((c for c in self.controls if c.control_id == control_id), None)
+        pol  = next((p for p in self.policies  if p.policy_id  == policy_id),  None)
+
+        if not ctrl:
+            print(f"Control '{control_id}' not found.")
+            return
+        if not pol:
+            print(f"Policy '{policy_id}' not found.")
+            return
+
+        ctrl_enc = control_encode_text(ctrl)
+        pol_enc  = policy_encode_text(pol)
+
+        ctrl_full = f"{ctrl.control_text} {ctrl.description} {ctrl.subdomain} {ctrl.domain}".lower()
+        pol_full  = f"{pol.policy_name} {pol.description} {pol.category}".lower()
+
+        ctrl_groups = _keyword_groups_for(ctrl_full)
+        pol_groups  = _keyword_groups_for(pol_full)
+        shared      = ctrl_groups & pol_groups
+
+        import re
+        stop = {"the","a","an","is","are","must","should","will","all","any",
+                "for","to","of","in","and","or","not","be","by","with","that",
+                "this","from","have","has","been","it","its","on","at","as","per"}
+        def tokens(t): return set(re.findall(r"[a-z0-9][a-z0-9-]{2,}", t)) - stop
+        ctrl_tok = tokens(ctrl_full)
+        pol_tok  = tokens(pol_full)
+        shared_tok = ctrl_tok & pol_tok
+        jaccard = len(shared_tok) / len(ctrl_tok | pol_tok) if (ctrl_tok | pol_tok) else 0
+
+        dom_match = _domain_category_match(ctrl.domain, pol.category)
+
+        print(f"\n{'='*60}")
+        print(f"  MATCH EXPLANATION")
+        print(f"{'='*60}")
+        print(f"  Control  : [{ctrl.control_id}] {ctrl.control_text[:80]}")
+        print(f"  Policy   : [{pol.policy_id}] {pol.policy_name}")
+        print(f"{'─'*60}")
+        print(f"  Encoded control text:")
+        print(f"    {ctrl_enc[:200]}")
+        print(f"  Encoded policy text:")
+        print(f"    {pol_enc[:200]}")
+        print(f"{'─'*60}")
+        print(f"  Keyword groups — Control  : {sorted(ctrl_groups)}")
+        print(f"  Keyword groups — Policy   : {sorted(pol_groups)}")
+        print(f"  Shared groups             : {sorted(shared)}  →  boost = +{min(len(shared)*0.10,0.30):.2f}")
+        print(f"  Shared tokens             : {sorted(list(shared_tok))[:15]}")
+        print(f"  Jaccard token overlap     : {jaccard:.4f}  →  boost = +{min(jaccard*2,0.20):.2f}")
+        print(f"  Domain-category match     : {dom_match}  →  boost = +{0.06 if dom_match else 0:.2f}")
+        total_boost = min(len(shared)*0.10,0.30) + min(jaccard*2,0.20) + (0.06 if dom_match else 0)
+        print(f"  Total boost               : +{total_boost:.2f}")
+        print(f"{'─'*60}")
+        print(f"  To get base SecBERT score : call mapper.run() first then check")
+        print(f"  Final score ≈ base_cosine + {total_boost:.2f} (minus penalty if base < 0.5)")
+        print(f"{'='*60}\n")
+
     def _assess_risk(self, text: str) -> str:
         t = text.lower()
         high = sum(1 for k in [
@@ -950,6 +1440,7 @@ class SSPMMapper:
                     "similarity_score": m.similarity_score,
                     "coverage":         m.coverage,
                     "impact":           m.impact,
+                    "confidence":       m.confidence,
                 }
                 for m in r.matches
             ],
