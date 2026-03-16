@@ -99,14 +99,32 @@ class ControlLoader:
         controls = []
         with open(path, "r", encoding="utf-8") as f:
             reader = csv.DictReader(f)
+            # Detect ID column name once from headers
+            id_col = None
+            id_candidates = ["control_id","id","control_no","ctrl_id","ctr_id",
+                             "no","number","ref","reference","control_ref",
+                             "standard_id","req_id","requirement_id","ctrl_no"]
+            fnames_lower = [f.strip().lower() for f in (reader.fieldnames or [])]
+            for cand in id_candidates:
+                if cand in fnames_lower:
+                    id_col = cand
+                    break
+            if not id_col:
+                print(f"ℹ️   Controls: no ID column found — will auto-generate IDs.")
+                print(f"    Add one of these columns to use your own IDs:")
+                print(f"    {id_candidates[:6]}")
+
             for i, row in enumerate(reader):
                 row = {k.strip().lower(): v.strip() for k, v in row.items()}
                 text = (row.get("control_text") or row.get("control") or
                         row.get("requirement") or row.get("description") or "")
                 if not text or text.startswith("#"):
                     continue
-                ctrl_id = (row.get("control_id") or row.get("id") or
-                           row.get("control_no") or f"CTR-{i+1:03d}")
+                # Use detected ID column, else auto-generate
+                if id_col:
+                    ctrl_id = row.get(id_col) or f"CTR-{i+1:03d}"
+                else:
+                    ctrl_id = f"CTR-{i+1:03d}"
                 controls.append(Control(
                     control_id   = ctrl_id,
                     control_text = text,
@@ -125,8 +143,14 @@ class ControlLoader:
         controls = []
         if isinstance(raw, list):
             for i, item in enumerate(raw):
+                # Try all accepted ID field names
+                ctrl_id_val = (item.get("control_id") or item.get("id") or
+                               item.get("control_no") or item.get("ctrl_id") or
+                               item.get("no") or item.get("number") or
+                               item.get("ref") or item.get("reference") or
+                               f"CTR-{i+1:03d}")
                 controls.append(Control(
-                    control_id   = item.get("control_id", item.get("id", f"CTR-{i+1:03d}")),
+                    control_id   = ctrl_id_val,
                     control_text = item.get("control_text", item.get("control", item.get("text", ""))),
                     domain       = item.get("domain", item.get("security_domain", "General")),
                     framework    = item.get("framework", item.get("standard", "")),
@@ -138,7 +162,9 @@ class ControlLoader:
             for domain, items in raw.items():
                 for i, item in enumerate(items):
                     controls.append(Control(
-                        control_id   = item.get("control_id", f"{domain[:3].upper()}-{i+1:03d}"),
+                        control_id   = (item.get("control_id") or item.get("id") or
+                                        item.get("control_no") or item.get("ref") or
+                                        f"{domain[:3].upper()}-{i+1:03d}"),
                         control_text = item.get("control_text", item.get("control", "")),
                         domain       = domain,
                         framework    = item.get("framework", ""),
@@ -166,23 +192,48 @@ class PolicyLoader:
         policies = []
         with open(path, "r", encoding="utf-8") as f:
             reader = csv.DictReader(f)
-            # Detect once if file has an app column
+            # Detect once from headers
             fieldnames_lower = [f.strip().lower() for f in (reader.fieldnames or [])]
             has_app_col = any(c in fieldnames_lower for c in ("app_name","app","application"))
+
+            # Detect policy ID column name
+            pol_id_col = None
+            pol_id_candidates = ["policy_id","id","pol_id","policy_no","pol_no",
+                                  "no","number","ref","policy_ref","ootb_id",
+                                  "control_id","rule_id","check_id","finding_id"]
+            for cand in pol_id_candidates:
+                if cand in fieldnames_lower:
+                    pol_id_col = cand
+                    break
+            if not pol_id_col:
+                print(f"ℹ️   Policies: no ID column found — will auto-generate IDs.")
+                print(f"    Add one of these columns to use your own IDs:")
+                print(f"    {pol_id_candidates[:6]}")
+
+            # Detect policy name column name
+            pol_name_candidates = ["policy_name","policy","name","control",
+                                   "rule","check","finding","title","description"]
+
             for i, row in enumerate(reader):
                 row = {k.strip().lower(): v.strip() for k, v in row.items()}
                 # Only filter by app name when the CSV actually has an app column
-                # If no app column → single-app file, load all rows
                 if app_filter and has_app_col:
                     app_col = (row.get("app_name") or row.get("app") or
                                row.get("application") or "")
                     if app_col.lower() != app_filter.lower():
                         continue
-                name = (row.get("policy_name") or row.get("policy") or
-                        row.get("name") or row.get("control") or "")
+                name = ""
+                for nc in pol_name_candidates:
+                    name = row.get(nc, "")
+                    if name:
+                        break
                 if not name or name.startswith("#"):
                     continue
-                pol_id = (row.get("policy_id") or row.get("id") or f"POL-{i+1:03d}")
+                # Use detected ID column, else auto-generate
+                if pol_id_col:
+                    pol_id = row.get(pol_id_col) or f"POL-{i+1:03d}"
+                else:
+                    pol_id = f"POL-{i+1:03d}"
                 policies.append(Policy(
                     policy_id   = pol_id,
                     policy_name = name,
@@ -220,8 +271,13 @@ class PolicyLoader:
                     policy_id=f"POL-{i+1:03d}", policy_name=item,
                     category="", description=""))
             else:
+                pol_id_val = (item.get("policy_id") or item.get("id") or
+                              item.get("pol_id") or item.get("policy_no") or
+                              item.get("no") or item.get("number") or
+                              item.get("ref") or item.get("rule_id") or
+                              f"POL-{i+1:03d}")
                 policies.append(Policy(
-                    policy_id   = item.get("policy_id", item.get("id", f"POL-{i+1:03d}")),
+                    policy_id   = pol_id_val,
                     policy_name = item.get("policy_name", item.get("policy", item.get("name", ""))),
                     category    = item.get("category", ""),
                     description = item.get("description", ""),
