@@ -453,6 +453,8 @@ class SecBERTEncoder:
 
 class EmbeddingCache:
     def _key(self, label: str, texts: list[str]) -> str:
+        # Hash includes label + all policy text content
+        # This means cache auto-invalidates when policy content changes
         return hashlib.sha256((label + "||".join(texts)).encode()).hexdigest()[:16]
 
     def get(self, label: str, texts: list[str]) -> Optional[np.ndarray]:
@@ -461,6 +463,14 @@ class EmbeddingCache:
 
     def set(self, label: str, texts: list[str], vecs: np.ndarray):
         pickle.dump(vecs, open(CACHE_DIR / f"{self._key(label, texts)}.pkl", "wb"))
+
+    def clear(self):
+        """Delete all cached embeddings. Run when switching model or policy files."""
+        deleted = 0
+        for p in CACHE_DIR.glob("*.pkl"):
+            p.unlink()
+            deleted += 1
+        print(f"🗑️   Cache cleared ({deleted} files deleted).")
 
 
 # ── Policy Text Builder ───────────────────────────────────────────────────────
@@ -518,9 +528,13 @@ class SSPMMapper:
     def load_controls(self, path: str):
         self.controls = ControlLoader.load(path)
         domains = sorted(set(c.domain for c in self.controls))
-        print(f"📋  Controls loaded : {len(self.controls)} controls")
+        print(f"📋  Controls loaded : {len(self.controls)} controls  [from: {path}]")
         print(f"     Domains        : {', '.join(domains)}")
-        print(f"     Frameworks     : {', '.join(sorted(set(c.framework for c in self.controls if c.framework)))}\n")
+        print(f"     Frameworks     : {', '.join(sorted(set(c.framework for c in self.controls if c.framework)))}")
+        # Show first 3 IDs so user can confirm IDs are read from their file
+        sample_ids = [c.control_id for c in self.controls[:3]]
+        print(f"     Sample IDs     : {sample_ids}  ← from your file")
+        print()
 
     def load_controls_from_list(self, controls: list[Control]):
         self.controls = controls
@@ -548,12 +562,18 @@ class SSPMMapper:
             filtered = PolicyLoader.load(path, app_filter=app)
             if len(filtered) > 0:
                 self.policies = filtered
-                print(f"📂  Policies loaded : {len(self.policies)} policies  [app: {app}  (filtered)]")
+                print(f"📂  Policies loaded : {len(self.policies)} policies  [app: {app}  (filtered from {path})]")
+                sample_ids = [p.policy_id for p in self.policies[:3]]
+                print(f"     Sample IDs     : {sample_ids}  ← from your file")
             else:
                 # No app_name column — single-app file, keep all rows
-                print(f"📂  Policies loaded : {len(self.policies)} policies  [app: {app}  (single-app file, no filter applied)]")
+                print(f"📂  Policies loaded : {len(self.policies)} policies  [app: {app}  (single-app file: {path})]")
+                sample_ids = [p.policy_id for p in self.policies[:3]]
+                print(f"     Sample IDs     : {sample_ids}  ← from your file")
         else:
-            print(f"📂  Policies loaded : {len(self.policies)} policies  [app: {app or 'all'}]")
+            print(f"📂  Policies loaded : {len(self.policies)} policies  [app: {app or 'all'}  from: {path}]")
+            sample_ids = [p.policy_id for p in self.policies[:3]]
+            print(f"     Sample IDs     : {sample_ids}  ← from your file")
         if len(self.policies) == 0:
             print(f"⚠️   0 policies loaded — check your file path and column names.")
             return
@@ -2024,6 +2044,10 @@ def parse_args():
                    default=None,
                    help="Path to local SecBERT model folder\n"
                         "Example: --model ./secbert_clean")
+    p.add_argument("--clear-cache",
+                   action="store_true",
+                   help="Delete all cached policy embeddings before running\n"
+                        "Use when switching policy files or SecBERT model")
     return p.parse_args()
 
 
@@ -2081,6 +2105,11 @@ def main():
 
     # ── Run mapper ────────────────────────────────────────────────────────────
     mapper = SSPMMapper(model_path=args.model)
+
+    # Clear cache if requested or if a fresh start is needed
+    if getattr(args, 'clear_cache', False):
+        mapper.cache.clear()
+
     mapper.load_controls(controls_file)
     mapper.load_policies(policies_file, app=app_name)
 
