@@ -1406,61 +1406,91 @@ class SSPMMapper:
         title_row(ws6, f"Mapping Relationship Types  |  {app}", 3)
         rel = report["relationships"]
 
-        r_types = [
-            ("1-to-1",    "one_to_one",   "1 control maps to exactly 1 policy",
-             ["Control ID","Policy ID"]),
-            ("1-to-Many", "one_to_many",  "1 control maps to multiple policies",
-             ["Control ID","Policy IDs"]),
-            ("Many-to-1", "many_to_one",  "Multiple controls map to the same policy",
-             ["Policy ID","Control IDs"]),
-            ("Many-to-Many","many_to_many","Cluster of controls maps to cluster of policies",
-             ["Control IDs","Policy IDs"]),
+        # 1-to-Many: derived directly from control_mappings (same source as One-to-Many sheet)
+        # A control is 1-to-many if it has more than 1 match regardless of overlap
+        one_to_many_direct = [
+            cm for cm in report["control_mappings"] if len(cm["matches"]) > 1
+        ]
+
+        # Build sections — 1-to-1 and many-to-* from classify, 1-to-many from mappings
+        sections = [
+            {
+                "label":       "1-to-1",
+                "description": "1 control maps to exactly 1 policy",
+                "col_hdrs":    ["Control ID", "Policy ID"],
+                "count":       len(rel["one_to_one"]),
+                "rows": [[item["control"], item["policy"]]
+                         for item in rel["one_to_one"]],
+            },
+            {
+                "label":       "1-to-Many",
+                "description": "1 control maps to multiple policies (same as One-to-Many sheet)",
+                "col_hdrs":    ["Control ID", "Control Text", "Policy IDs", "Policy Count"],
+                "count":       len(one_to_many_direct),
+                "rows": [
+                    [
+                        cm["control_id"],
+                        cm["control_text"],
+                        ", ".join(m["policy_id"] for m in cm["matches"]),
+                        len(cm["matches"]),
+                    ]
+                    for cm in one_to_many_direct
+                ],
+            },
+            {
+                "label":       "Many-to-1",
+                "description": "Multiple controls map to the same policy",
+                "col_hdrs":    ["Policy ID", "Control IDs", "Control Count"],
+                "count":       len(rel["many_to_one"]),
+                "rows": [[item["policy"],
+                          ", ".join(item["controls"]),
+                          len(item["controls"])]
+                         for item in rel["many_to_one"]],
+            },
+            {
+                "label":       "Many-to-Many",
+                "description": "Cluster of controls share a cluster of policies",
+                "col_hdrs":    ["Control IDs", "Policy IDs", "Size"],
+                "count":       len(rel["many_to_many"]),
+                "rows": [[", ".join(item["controls"]),
+                          ", ".join(item["policies"]),
+                          f"{len(item['controls'])} x {len(item['policies'])}"]
+                         for item in rel["many_to_many"]],
+            },
         ]
 
         current_row = 3
-        for label, key, description, col_hdrs in r_types:
-            items = rel.get(key, [])
-            # Section title
+        for sec in sections:
+            # Section header
+            ncols = len(sec["col_hdrs"])
             ws6.merge_cells(start_row=current_row, start_column=1,
-                            end_row=current_row, end_column=3)
+                            end_row=current_row, end_column=max(ncols, 3))
             c = ws6.cell(row=current_row, column=1,
-                         value=f"{label}  ({len(items)})  —  {description}")
-            c.font  = hdr_font(size=11, color="FFFFFF")
-            c.fill  = fill(C_HEADER_MID)
+                         value=f"{sec['label']}  ({sec['count']})  —  {sec['description']}")
+            c.font      = hdr_font(size=11, color="FFFFFF")
+            c.fill      = fill(C_HEADER_MID)
             c.alignment = Alignment(horizontal="left", vertical="center")
             ws6.row_dimensions[current_row].height = 22
             current_row += 1
 
-            write_header_row(ws6, current_row, col_hdrs + ["Count"])
+            write_header_row(ws6, current_row, sec["col_hdrs"])
             current_row += 1
 
-            if not items:
+            if not sec["rows"]:
                 ws6.cell(row=current_row, column=1,
                          value="No relationships of this type.").font = body_font(color="595959")
                 current_row += 1
             else:
-                for i, item in enumerate(items):
-                    alt = (i % 2 == 1)
-                    if key == "one_to_one":
-                        vals = [item["control"], item["policy"], 1]
-                    elif key == "one_to_many":
-                        vals = [item["control"],
-                                ", ".join(item["policies"]),
-                                len(item["policies"])]
-                    elif key == "many_to_one":
-                        vals = [item["policy"],
-                                ", ".join(item["controls"]),
-                                len(item["controls"])]
-                    else:
-                        vals = [", ".join(item["controls"]),
-                                ", ".join(item["policies"]),
-                                f"{len(item['controls'])} x {len(item['policies'])}"]
-                    write_data_row(ws6, current_row, vals, alt=alt)
+                for i, row_vals in enumerate(sec["rows"]):
+                    write_data_row(ws6, current_row, row_vals, alt=(i % 2 == 1))
+                    # Wrap long policy ID lists
+                    for col in range(1, len(row_vals) + 1):
+                        ws6.cell(row=current_row, column=col).alignment = wrap_align()
                     current_row += 1
 
-            current_row += 1  # blank spacer row
+            current_row += 1  # blank spacer
 
-        set_col_widths(ws6, {"A":25,"B":55,"C":12})
+        set_col_widths(ws6, {"A":20,"B":50,"C":50,"D":12})
 
         # ═══════════════════════════════════════════════════════════════════════
         # SHEET 7 — One-to-Many (controls that map to multiple policies)
@@ -1586,9 +1616,10 @@ class SSPMMapper:
                     ctrl_id_cell.alignment = wrap_align("center")
 
                     ctrl_txt = ws8.cell(row=mm_row, column=3,
-                                        value=cm["control_text"][:80])
+                                        value=cm["control_text"])
                     ctrl_txt.font = body_font(color=C_UNMAP)
                     ctrl_txt.alignment = wrap_align()
+                    ws8.row_dimensions[mm_row].height = None  # auto height
 
                     ws8.cell(row=mm_row, column=4, value="✘ NO MATCH").font =                         Font(name="Arial", size=10, bold=True, color=C_UNMAP)
                     mm_row += 1
@@ -1606,7 +1637,7 @@ class SSPMMapper:
                             ctrl_id_cell.alignment = wrap_align("center")
 
                             ctrl_txt = ws8.cell(row=mm_row, column=3,
-                                                value=cm["control_text"][:80])
+                                                value=cm["control_text"])
                             ctrl_txt.font      = body_font(bold=True)
                             ctrl_txt.alignment = wrap_align()
 
