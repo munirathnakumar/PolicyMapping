@@ -1,0 +1,59 @@
+{
+  "identity and access management": [
+    "mfa",
+    "access control",
+    "password management",
+    "permissions",
+    "privacy control",
+    "auditing"
+  ],
+  "access control": [
+    "access control",
+    "permissions",
+    "mfa",
+    "password management",
+    "auditing"
+  ],
+  "secure configuration management": [
+    "secure baseline",
+    "configuration and posture management",
+    "permissions",
+    "auditing",
+    "access control"
+  ],
+  "data protection": [
+    "data leakage protection",
+    "key management",
+    "privacy control",
+    "auditing"
+  ],
+  "third-party plugin and integration management": [
+    "access control",
+    "permissions",
+    "secure baseline",
+    "auditing"
+  ],
+  "securityoperations": [
+    "auditing",
+    "malware protection",
+    "operational resilience",
+    "secure baseline"
+  ],
+  "configuration and posture management": [
+    "secure baseline",
+    "auditing",
+    "permissions",
+    "access control"
+  ],
+  "network services security requirements": [
+    "access control",
+    "secure baseline",
+    "auditing"
+  ],
+  "governance": [
+    "auditing",
+    "secure baseline",
+    "operational resilience",
+    "privacy control"
+  ]
+}

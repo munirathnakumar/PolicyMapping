@@ -579,7 +579,513 @@ SYNONYM_MAP = {
     r"data residency":             "data residency geographic location region compliance",
     r"audit trail":                "audit trail log record activity history",
     r"anomalous":                  "anomalous unusual suspicious behaviour detection",
+    # Explicit at-rest vs in-transit expansions
+    r"at.rest":            "at rest storage encryption data stored encrypted storage",
+    r"in.transit":         "in transit transport encryption tls ssl network encrypted",
+    r"data.at.rest":       "data at rest storage encryption encrypted storage",
+    r"data.in.transit":    "data in transit transport tls ssl network encryption",
+    r"transparent.data":   "transparent data encryption at rest database storage",
 }
+
+
+# ── Concept Bridge Map ────────────────────────────────────────────────────────
+# Maps HIGH-LEVEL control concepts → POLICY-LEVEL implementation vocabulary
+# This is the key fix for mismatches like:
+#   "geofencing" → "conditional access location-based policy"
+#   "risky sign-in" → "identity protection risk-based conditional access"
+#
+# Each entry: (phrase_in_control, text_to_append_to_encoding)
+# The appended text uses the vocabulary the POLICY would use
+#
+# Add your own entries here when you find bad/missing matches
+
+CONCEPT_BRIDGES = [
+    # ── Location & Network Access ─────────────────────────────────────────────
+    ("geofenc",
+     "geofencing location-based access conditional access trusted location "
+     "ip range network location restriction country block"),
+
+    ("location-based",
+     "location-based access conditional access trusted location ip restriction "
+     "named location country-based geofencing"),
+
+    ("country.*block",
+     "country block conditional access location policy geofencing ip restriction"),
+
+    ("trusted location",
+     "trusted location conditional access named location ip range geofencing"),
+
+    ("network restriction",
+     "network restriction ip range location conditional access allowlist"),
+
+    # ── Risk-Based Access ─────────────────────────────────────────────────────
+    ("risky sign",
+     "risky sign-in risk-based conditional access identity protection "
+     "risk policy anomalous login suspicious authentication block"),
+
+    ("risky user",
+     "risky user identity protection risk-based access conditional access "
+     "compromised account high risk block"),
+
+    ("risk-based access",
+     "risk-based access conditional access identity protection sign-in risk "
+     "user risk policy"),
+
+    ("high risk",
+     "high risk user sign-in risk identity protection conditional access "
+     "block remediate"),
+
+    ("compromised account",
+     "compromised account risky user identity protection conditional access "
+     "block revoke session"),
+
+    ("anomalous login",
+     "anomalous login risky sign-in identity protection conditional access "
+     "unusual activity suspicious"),
+
+    # ── Identity & Authentication ─────────────────────────────────────────────
+    ("step-up auth",
+     "step-up authentication mfa challenge conditional access sensitive resource"),
+
+    ("adaptive auth",
+     "adaptive authentication risk-based mfa conditional access"),
+
+    ("passwordless",
+     "passwordless fido2 security key windows hello authentication"),
+
+    ("continuous auth",
+     "continuous authentication session re-evaluation conditional access"),
+
+    # ── Data Governance ───────────────────────────────────────────────────────
+    ("data classification",
+     "data classification sensitivity label information protection dlp policy"),
+
+    ("sensitivity label",
+     "sensitivity label data classification information protection dlp encrypt"),
+
+    ("information barrier",
+     "information barrier dlp communication compliance data segmentation"),
+
+    ("data sovereignty",
+     "data sovereignty data residency region compliance geographic restriction"),
+
+    # ── Endpoint & Device ─────────────────────────────────────────────────────
+    ("unmanaged device",
+     "unmanaged device byod conditional access device compliance mdm"),
+
+    ("device compliance",
+     "device compliance conditional access managed device intune mdm"),
+
+    ("jailbreak",
+     "jailbreak rooted device mdm endpoint compliance block"),
+
+    # ── Threat & Incident ─────────────────────────────────────────────────────
+    ("lateral movement",
+     "lateral movement privileged access pam session monitoring detection"),
+
+    ("impossible travel",
+     "impossible travel risky sign-in identity protection anomaly alert"),
+
+    ("brute force",
+     "brute force password lockout account protection smart lockout"),
+
+    ("credential stuffing",
+     "credential stuffing password spray smart lockout identity protection"),
+
+    # ── Sharing & Collaboration ───────────────────────────────────────────────
+    ("oversharing",
+     "oversharing external sharing dlp data classification sensitivity label"),
+
+    ("guest sharing",
+     "guest sharing external user access review conditional access"),
+
+    ("email forwarding",
+     "email forwarding mailbox rule exfiltration dlp transport rule"),
+
+    # ── Privilege & Admin ─────────────────────────────────────────────────────
+    ("standing access",
+     "standing access just-in-time pim privileged access time-bound"),
+
+    ("emergency access",
+     "emergency access break glass privileged account admin"),
+
+    ("shadow admin",
+     "shadow admin privileged account access review role assignment"),
+
+    # ── Compliance ────────────────────────────────────────────────────────────
+    ("right to be forgotten",
+     "right to be forgotten gdpr data deletion retention policy"),
+
+    ("data minimisation",
+     "data minimisation gdpr privacy dlp classification retention"),
+
+    ("cross-border transfer",
+     "cross-border transfer data residency gdpr compliance geographic"),
+]
+
+
+# ── Vendor Policy Name Library ───────────────────────────────────────────────
+# When a policy has NO description (common with OOTB policies), this library
+# provides semantic descriptions automatically keyed on the policy name.
+# This solves the "short policy name vs long control text" mismatch.
+# Add entries for your specific vendor's policy names here.
+
+POLICY_NAME_LIBRARY = {
+    # ── Salesforce — Identity & Authentication ────────────────────────────────
+    "enable sso": (
+        "Enable Single Sign-On SSO SAML federation centralized authentication "
+        "identity provider all applications must federate"
+    ),
+    "enforce authentication through custom domain": (
+        "Enforce SSO authentication through custom domain SAML identity provider "
+        "federated login prevent direct salesforce login"
+    ),
+    "disable login with salesforce credentials": (
+        "Disable native Salesforce credential login enforce SSO single sign-on "
+        "identity provider federated authentication"
+    ),
+    "mfa": (
+        "Multi-factor authentication MFA two-factor step-up enforced all users "
+        "login verification second factor"
+    ),
+    "physical security key authentication": (
+        "Physical security key FIDO2 hardware token phishing-resistant MFA "
+        "step-up authentication privileged accounts"
+    ),
+    "enable authenticator passwordless login": (
+        "Authenticator passwordless login lightning login FIDO MFA two-factor "
+        "authentication step-up"
+    ),
+    "certificate-based authentication": (
+        "Certificate-based authentication PKI x509 mutual TLS strong authentication "
+        "MFA alternative"
+    ),
+    "identity verification with sms": (
+        "SMS identity verification two-factor MFA step-up authentication "
+        "second factor verification code"
+    ),
+    "force non-email verification methods": (
+        "Force non-email MFA verification methods authenticator app security key "
+        "phishing-resistant step-up"
+    ),
+    "require identity verification for email address change": (
+        "Require identity verification MFA step-up for email address change "
+        "account modification sensitive change"
+    ),
+    "email confirmations for email change": (
+        "Email confirmation for email address change identity verification "
+        "account security external users communities"
+    ),
+    # ── Salesforce — Session Management ──────────────────────────────────────
+    "inactive sessions logout timeout": (
+        "Inactive session logout timeout idle session expiry auto-logout "
+        "session management controls"
+    ),
+    "inactive sessions logout": (
+        "Inactive session logout timeout idle expiry session management "
+        "auto-logout session controls"
+    ),
+    "profile inactive sessions logout timeout": (
+        "Profile-level inactive session logout timeout idle expiry "
+        "session management per profile"
+    ),
+    "session timeouts": (
+        "Session timeout idle expiry management controls auto-logout "
+        "re-authentication session duration"
+    ),
+    "enforce session termination on admin password reset": (
+        "Enforce session termination terminate all sessions on admin password reset "
+        "security incident response revoke session"
+    ),
+    "lock sessions to the domain in which they were first used": (
+        "Lock session to originating domain session security prevent hijacking "
+        "session binding"
+    ),
+    "re-login after login as user": (
+        "Re-login after admin login-as-user session security admin access "
+        "audit logging"
+    ),
+    "external client application- required session level": (
+        "External client application required session level assurance "
+        "MFA session security OAuth"
+    ),
+    # ── Salesforce — Password & Lockout ──────────────────────────────────────
+    "lockout interval": (
+        "Lockout interval account lockout duration brute force protection "
+        "failed login attempts password policy"
+    ),
+    "profile lockout interval": (
+        "Profile lockout interval per-profile account lockout duration "
+        "brute force protection"
+    ),
+    "invalid login attempts": (
+        "Invalid login attempts threshold account lockout brute force protection "
+        "failed authentication password policy"
+    ),
+    "security check": (
+        "Security health check password policy settings baseline configuration "
+        "security posture assessment"
+    ),
+    "autocomplete user name": (
+        "Autocomplete username disable credential exposure browser autofill "
+        "login security"
+    ),
+    "password reset mechanism": (
+        "Password reset mechanism self-service password reset alignment "
+        "identity management standards procedures"
+    ),
+    # ── Salesforce — Access Control & IP Restriction ──────────────────────────
+    "trusted ip ranges configuration": (
+        "Trusted IP ranges configuration geofencing location-based access "
+        "conditional access network restriction allowlist whitelist "
+        "restrict login by location country"
+    ),
+    "high privilege profile ip restriction": (
+        "High privilege profile IP restriction location-based access "
+        "geofencing privileged access admin restriction trusted network"
+    ),
+    "non privilege profile ip restriction": (
+        "Non-privilege profile IP restriction location-based access "
+        "geofencing network restriction trusted IP"
+    ),
+    "connected application ip restriction": (
+        "Connected application IP restriction geofencing location-based "
+        "network restriction OAuth app access control"
+    ),
+    "external client application- ip restriction enforcement": (
+        "External client application IP restriction enforcement geofencing "
+        "location-based access network restriction"
+    ),
+    "login from known ip ranges on every page request": (
+        "Login from known IP ranges every page request continuous location "
+        "verification geofencing conditional access network"
+    ),
+    "limit connected apps api access": (
+        "Limit connected apps API access allowlisted third-party integration "
+        "OAuth restriction API governance"
+    ),
+    "restrict customers and partners api access": (
+        "Restrict customers partners API access third-party integration "
+        "external API restriction access control"
+    ),
+    "limit connected apps to specific profiles or permission sets": (
+        "Limit connected apps specific profiles permission sets RBAC "
+        "role-based access OAuth app restriction"
+    ),
+    "oauth connected apps with full access scope": (
+        "OAuth connected apps full access scope third-party integration "
+        "admin consent API permission restriction"
+    ),
+    "oauth username-password flows": (
+        "OAuth username password flows legacy authentication disable "
+        "insecure OAuth flow restriction"
+    ),
+    "oauth user-agent flow": (
+        "OAuth user agent flow implicit flow legacy insecure "
+        "restriction OAuth security"
+    ),
+    "oauth pkce requirement": (
+        "OAuth PKCE requirement proof key code exchange secure OAuth "
+        "authorization code flow security"
+    ),
+    "oauth credential flow": (
+        "OAuth credential flow client credentials machine-to-machine "
+        "API authentication restriction"
+    ),
+    "connected app uses non expiring refresh tokens": (
+        "Connected app non-expiring refresh tokens token expiry "
+        "session management OAuth token lifecycle"
+    ),
+    "external client application- single logout": (
+        "External client application single logout SLO SSO federation "
+        "session termination"
+    ),
+    "external client application- secret requirement": (
+        "External client application secret requirement OAuth client secret "
+        "API authentication credential"
+    ),
+    "external client application - introspect all tokens": (
+        "External client application introspect tokens OAuth token validation "
+        "security"
+    ),
+    "external client application - client credential flow": (
+        "External client application client credential flow OAuth machine "
+        "API authentication restriction"
+    ),
+    "named credentials anonymous authentication": (
+        "Named credentials anonymous authentication restrict third-party "
+        "integration credential management"
+    ),
+    # ── Salesforce — User Provisioning & Lifecycle ────────────────────────────
+    "dormant users": (
+        "Dormant users inactive account deprovisioning user lifecycle "
+        "account management disable stale accounts"
+    ),
+    "users with login access to support": (
+        "Users with login access to support admin access review "
+        "privileged access governance"
+    ),
+    "admins log-in to other user's account": (
+        "Admins login to other user account privileged access audit "
+        "admin capability governance logging"
+    ),
+    "self registration for digital workspace site": (
+        "Self-registration digital workspace external user provisioning "
+        "user lifecycle community sites"
+    ),
+    "prevent using standard external profiles for self-registration and user creation": (
+        "Prevent standard external profiles self-registration user creation "
+        "user lifecycle provisioning governance"
+    ),
+    "user account provisioning": (
+        "User account provisioning deprovisioning lifecycle management "
+        "identity standards SCIM automation"
+    ),
+    # ── Salesforce — Permissions & Role-Based Access ──────────────────────────
+    "field-level security for flexcards using soql data sources enforcement": (
+        "Field-level security FLS SOQL data sources enforcement least privilege "
+        "data access control attribute-based ABAC"
+    ),
+    "access controls on cached integration procedure metadata enforcement": (
+        "Access controls cached integration procedure metadata enforcement "
+        "least privilege RBAC permission"
+    ),
+    "remote action execution to authorized apex classes restriction": (
+        "Remote action execution authorized Apex classes restriction "
+        "least privilege code execution access control"
+    ),
+    "require permission to view record names in lookup fields": (
+        "Require permission view record names lookup fields least privilege "
+        "field-level access control"
+    ),
+    "role- and attribute-base access controls": (
+        "Role attribute-based access controls RBAC ABAC least privilege "
+        "identity management standards"
+    ),
+    # ── Salesforce — Data & Metadata Security ────────────────────────────────
+    "restrict access to custom metadata types": (
+        "Restrict access custom metadata types data governance access control "
+        "least privilege"
+    ),
+    "restrict access to custom settings": (
+        "Restrict access custom settings configuration security least privilege "
+        "admin restriction"
+    ),
+    "disable sosl search on custom settings": (
+        "Disable SOSL search custom settings data exposure restriction "
+        "access control"
+    ),
+    "field-level security and encryption controls in data mappers enforcement": (
+        "Field-level security encryption controls data mappers enforcement "
+        "data protection least privilege OmniStudio"
+    ),
+    "excessive access to omnistudio data pack attachments": (
+        "Excessive access OmniStudio data pack attachments least privilege "
+        "data access governance"
+    ),
+    "permissions for nested integration procedure actions enforcement": (
+        "Permissions nested integration procedure actions enforcement "
+        "least privilege access control OmniStudio"
+    ),
+    "disable scale cache to prevent unauthorized execution of data mappers": (
+        "Disable scale cache prevent unauthorized execution data mappers "
+        "security control access restriction OmniStudio"
+    ),
+    # ── Salesforce — Network & Protocol Security ─────────────────────────────
+    "remote sites protocol (http/s) security": (
+        "Remote sites protocol HTTP HTTPS security TLS in-transit encryption "
+        "network security remote endpoint"
+    ),
+    "remote endpoints (remote sites) without tls": (
+        "Remote endpoints without TLS insecure HTTP protocol in-transit "
+        "encryption network security"
+    ),
+    "warn on redirection out of salesforce": (
+        "Warn redirection out of Salesforce external redirect security "
+        "phishing protection"
+    ),
+    "require httponly attribute": (
+        "Require HttpOnly attribute cookie security session security "
+        "XSS protection"
+    ),
+    # ── Salesforce — Community & External Access ──────────────────────────────
+    "community sites - guest users public chatter api access": (
+        "Community sites guest users public Chatter API access external "
+        "user restriction least privilege Digital Experience"
+    ),
+    "community sites - guest files access": (
+        "Community sites guest files access external user restriction "
+        "least privilege Digital Experience"
+    ),
+    "public report folders accessible by all users": (
+        "Public report folders accessible all users least privilege "
+        "data exposure restriction access control"
+    ),
+    "public dashboard folders accessible by all users": (
+        "Public dashboard folders accessible all users least privilege "
+        "data exposure restriction"
+    ),
+    "customer invitations to private groups": (
+        "Customer invitations private groups external access governance "
+        "community access control"
+    ),
+    # ── Salesforce — Monitoring & Audit ──────────────────────────────────────
+    "[shield] analytics - number of users with admin access to event monitoring": (
+        "Shield analytics admin access event monitoring audit log "
+        "privileged access logging"
+    ),
+    "[shield] analytics - number of users with read access to event monitoring": (
+        "Shield analytics read access event monitoring audit logging "
+        "security monitoring"
+    ),
+    "connected apps with user interface access": (
+        "Connected apps user interface access OAuth third-party "
+        "application access governance"
+    ),
+}
+
+
+def enrich_policy_from_library(policy_name: str, existing_description: str) -> str:
+    """
+    Look up the policy name in POLICY_NAME_LIBRARY.
+    If found AND the policy has no description (or a very short one),
+    return the library description to augment encoding.
+    Always appends library text — it never replaces a real description.
+    """
+    name_lower = policy_name.strip().lower()
+    # Try exact match first
+    if name_lower in POLICY_NAME_LIBRARY:
+        lib_text = POLICY_NAME_LIBRARY[name_lower]
+        if existing_description and len(existing_description.strip()) > 20:
+            return existing_description + " " + lib_text
+        return lib_text
+    # Try partial match — if policy name contains a known key phrase
+    for key, lib_text in POLICY_NAME_LIBRARY.items():
+        if key in name_lower or name_lower in key:
+            if existing_description and len(existing_description.strip()) > 20:
+                return existing_description + " " + lib_text
+            return lib_text
+    return existing_description
+
+
+def expand_concepts(text: str) -> str:
+    """
+    Expand high-level control concepts into policy-implementation vocabulary.
+    Called AFTER expand_synonyms — adds bridging text at the end.
+    Example:
+      "geofencing must restrict access" →
+      "geofencing must restrict access [geofencing location-based access
+       conditional access trusted location ip range ...]"
+    """
+    import re
+    t     = text.lower()
+    extra = []
+    for phrase, expansion in CONCEPT_BRIDGES:
+        if re.search(phrase, t, flags=re.IGNORECASE):
+            extra.append(expansion)
+    if extra:
+        return text + " " + " ".join(extra)
+    return text
 
 
 def expand_synonyms(text: str) -> str:
@@ -639,7 +1145,17 @@ KEYWORD_GROUPS = {
         "allowlist","whitelist","ip range","just-in-time","pim","jit",
         "privilege","entitlement","access restriction","access policy",
         "access rights","user rights","group policy","access review",
-        "segregation of duties","need to know","zero trust","access management"
+        "segregation of duties","need to know","zero trust","access management",
+        "geofenc","location-based","trusted location","named location",
+        "conditional access","country block","network restriction",
+        "trusted network","ip address restriction","login ip","ip ranges"
+    ],
+    "risk_based_access": [
+        "risky sign","risky user","risk-based","high risk","identity protection",
+        "sign-in risk","user risk","compromised","impossible travel",
+        "anomalous login","suspicious login","adaptive auth","step-up",
+        "continuous auth","risk policy","risk score","threat detection login",
+        "risk remediat","block risky","enforce mfa risky"
     ],
     "privileged_access": [
         "privileged","admin","administrator","root","superuser","elevated",
@@ -672,16 +1188,28 @@ KEYWORD_GROUPS = {
         "external user","outside organisation","third party sharing",
         "public access","open access","unrestricted sharing","outbound"
     ],
-    "encryption": [
-        "encrypt","tls","ssl","aes","kms","key management","at rest",
-        "in transit","cipher","certificate","https","e2e","end-to-end",
-        "encryption key","encrypted storage","encrypted communication",
-        "transport security","tokenization"
+    # Split into sub-groups — at_rest and in_transit are DIFFERENT controls
+    "encryption_at_rest": [
+        "at rest","storage encrypt","data stored","disk encrypt","database encrypt",
+        "encrypted storage","encrypt stored","encrypt database","encrypt file",
+        "encrypt volume","transparent data","data at rest","rest encryption",
+        "kms","key management","encrypt field","encrypt column"
+    ],
+    "encryption_in_transit": [
+        "in transit","tls","ssl","https","transport","network encrypt",
+        "data transmitted","encrypt communication","end-to-end","e2e",
+        "channel encrypt","transport security","in-flight","in-transit",
+        "data in motion","wire encrypt"
+    ],
+    "encryption_general": [
+        "encrypt","cipher","aes","certificate","tokenization","encryption key",
+        "cryptograph","key rotation","hsm","pkcs","x509"
     ],
     "data_residency": [
-        "data residency","data sovereignty","geo","region","country",
+        "data residency","data sovereignty","region","country",
         "cross-border","transborder","eu","gdpr transfer","data location",
-        "store data","data centre","regional","local storage"
+        "store data","data centre","regional","local storage",
+        "geographic restriction","data geography"
     ],
     # ── Logging & Monitoring ──────────────────────────────────────────────────
     "audit_logging": [
@@ -745,6 +1273,18 @@ KEYWORD_GROUPS = {
 KEYWORD_BOOST    = 0.08   # per matching keyword group (capped at 0.25)
 DOMAIN_BOOST     = 0.05   # when control domain aligns with policy category
 NONSENSE_PENALTY = 0.20   # applied when zero keyword overlap AND base score < 0.55
+CONFLICT_PENALTY = 0.25   # applied when conflicting sub-groups detected
+
+# Pairs of keyword sub-groups that CONFLICT with each other
+# If one side has group A and the other exclusively has group B → penalise
+CONFLICT_PAIRS = [
+    ("encryption_at_rest",   "encryption_in_transit"),  # at-rest ≠ in-transit
+    ("compliance_retention", "incident_response"),       # retain logs ≠ incident block
+    ("user_lifecycle",       "endpoint_device"),         # user account ≠ device mgmt
+    ("mfa",                  "network_security"),        # MFA auth ≠ IP/network restriction
+    ("mfa",                  "data_residency"),          # MFA auth ≠ data location
+    ("session",              "access_control"),          # session timeout ≠ access policy
+]
 
 
 def _keyword_groups_for(text: str) -> set:
@@ -774,17 +1314,27 @@ def _domain_category_match(domain: str, category: str) -> bool:
 def policy_encode_text(policy: Policy) -> str:
     """
     Build rich encoding text for a policy.
-    Synonym-expanded so TF-IDF and SecBERT both get consistent vocabulary.
-    Policy name repeated to up-weight the primary signal.
-    Description and category add depth.
+    1. Enrich with POLICY_NAME_LIBRARY if no/short description
+    2. Expand abbreviations and concepts
+    3. Repeat policy name for emphasis
+    4. Append enriched description
+    This solves the core problem: short OOTB policy names (e.g. "Enable SSO",
+    "Trusted IP Ranges Configuration") matched against long verbose controls.
     """
     parts = []
-    name = expand_synonyms(policy.policy_name) if policy.policy_name else ""
+    name = expand_concepts(expand_synonyms(policy.policy_name)) if policy.policy_name else ""
     if name:
         parts.append(name)
-        parts.append(name)                        # repeat for emphasis
-    if policy.description:
-        parts.append(expand_synonyms(policy.description))
+        parts.append(name)
+
+    # Enrich description from library when description is missing or short
+    enriched = enrich_policy_from_library(
+        policy.policy_name or "",
+        policy.description or ""
+    )
+    if enriched:
+        parts.append(expand_concepts(expand_synonyms(enriched)))
+
     if policy.category:
         parts.append(policy.category)
     return " . ".join(parts)
@@ -793,17 +1343,18 @@ def policy_encode_text(policy: Policy) -> str:
 def control_encode_text(control: Control) -> str:
     """
     Build rich encoding text for a control.
-    Synonym-expanded so abbreviations align with policy vocabulary.
-    Control text repeated to up-weight it.
-    Description and subdomain add extra signal.
+    1. Expand abbreviations (MFA → multi-factor authentication)
+    2. Expand concepts (geofencing → conditional access location policy)
+    3. Repeat control text for emphasis
+    4. Append description — where detailed text lives
     """
     parts = []
-    text = expand_synonyms(control.control_text) if control.control_text else ""
+    text = expand_concepts(expand_synonyms(control.control_text)) if control.control_text else ""
     if text:
         parts.append(text)
-        parts.append(text)                         # repeat for emphasis
+        parts.append(text)
     if control.description:
-        parts.append(expand_synonyms(control.description))
+        parts.append(expand_concepts(expand_synonyms(control.description)))
     if control.subdomain:
         parts.append(control.subdomain)
     return " . ".join(parts)
@@ -861,17 +1412,178 @@ def hybrid_score(base_score: float,
         ctrl.domain, policy.category) else 0.0
 
     # ── 4. Nonsense penalty ───────────────────────────────────────────────────
-    # If ZERO keyword groups match AND base score is weak → this is likely
-    # a false positive from embedding similarity on generic security words
+    # Zero keyword group overlap → apply penalty at all score levels
+    # Prevents domain_boost from falsely elevating unrelated policies
     if not shared_groups and base_score < 0.55:
         penalty = NONSENSE_PENALTY
-    elif not shared_groups and base_score < 0.68:
-        penalty = NONSENSE_PENALTY * 0.5   # lighter penalty for mid-range scores
+    elif not shared_groups and base_score < 0.75:
+        penalty = NONSENSE_PENALTY * 0.7   # covers mid-high base scores
+    elif not shared_groups:
+        penalty = NONSENSE_PENALTY * 0.3   # even high base gets small penalty
     else:
         penalty = 0.0
 
-    final = base_score + kw_boost + desc_boost + dom_boost - penalty
+    # ── 5. Conflict penalty ──────────────────────────────────────────────────
+    # Penalise when a known conflicting sub-group pair is detected
+    # e.g. control says "at rest" but policy says "in transit" → different concepts
+    conflict_penalty = 0.0
+    conflict_detected = False
+    for grp_a, grp_b in CONFLICT_PAIRS:
+        ctrl_a = grp_a in ctrl_groups
+        ctrl_b = grp_b in ctrl_groups
+        pol_a  = grp_a in pol_groups
+        pol_b  = grp_b in pol_groups
+        # One side exclusively has A, other side exclusively has B
+        if (ctrl_a and not ctrl_b) and (pol_b and not pol_a):
+            conflict_penalty = max(conflict_penalty, CONFLICT_PENALTY)
+            conflict_detected = True
+        if (ctrl_b and not ctrl_a) and (pol_a and not pol_b):
+            conflict_penalty = max(conflict_penalty, CONFLICT_PENALTY)
+            conflict_detected = True
+
+    # When conflict detected: cancel ALL boosts (they are from shared generic terms)
+    # and only apply the conflict penalty on top of base score
+    if conflict_detected:
+        final = base_score - conflict_penalty
+    else:
+        final = base_score + kw_boost + desc_boost + dom_boost - penalty
+
     return round(min(max(final, 0.0), 1.0), 4)
+
+
+# ── Domain Pairing Map ───────────────────────────────────────────────────────
+# Maps each STANDARD domain → list of allowed POLICY domains.
+# Controls in a standard domain will ONLY be matched against policies
+# whose category is in the allowed policy domains.
+# This prevents IAM controls matching against Malware Protection policies etc.
+#
+# Based on your domain structure from the image:
+#   Standard domains  → Policy domains
+#
+# CUSTOMISE THIS to match your organisation's domain pairing decisions.
+# Leave DOMAIN_PAIRS empty ({}) to disable filtering (match all vs all).
+
+DOMAIN_PAIRS: dict[str, list[str]] = {
+    # ── Standard Domain → Allowed Policy Domains ─────────────────────────────
+    "identity and access management": [
+        "mfa",
+        "access control",
+        "password management",
+        "permissions",
+        "privacy control",
+        "auditing",
+    ],
+    "access control": [
+        "access control",
+        "permissions",
+        "mfa",
+        "password management",
+        "auditing",
+    ],
+    "secure configuration management": [
+        "secure baseline",
+        "configuration and posture management",
+        "permissions",
+        "auditing",
+        "access control",
+    ],
+    "data protection": [
+        "data leakage protection",
+        "key management",
+        "privacy control",
+        "auditing",
+    ],
+    "third-party plugin and integration management": [
+        "access control",
+        "permissions",
+        "secure baseline",
+        "auditing",
+    ],
+    "securityoperations": [
+        "auditing",
+        "malware protection",
+        "operational resilience",
+        "secure baseline",
+    ],
+    "configuration and posture management": [
+        "secure baseline",
+        "auditing",
+        "permissions",
+        "access control",
+    ],
+    "network services security requirements": [
+        "access control",
+        "secure baseline",
+        "auditing",
+    ],
+    "governance": [
+        "auditing",
+        "secure baseline",
+        "operational resilience",
+        "privacy control",
+    ],
+}
+
+
+def get_allowed_policy_domains(control_domain: str) -> list[str]:
+    """
+    Return allowed policy domains for a given control domain.
+    Case-insensitive lookup.
+    Returns empty list if domain not in map (meaning: allow all — no filter).
+    """
+    d = control_domain.strip().lower()
+    # Exact match
+    if d in DOMAIN_PAIRS:
+        return [x.lower() for x in DOMAIN_PAIRS[d]]
+    # Partial match — e.g. "Identity and Access Management" matches "identity"
+    for key, allowed in DOMAIN_PAIRS.items():
+        if key in d or d in key:
+            return [x.lower() for x in allowed]
+    return []   # no match → no filter applied (allow all)
+
+
+# Tracks policy categories seen that are NOT in any domain pair
+# Populated during run — printed as warning so user can add them
+_UNKNOWN_POLICY_DOMAINS: set = set()
+
+
+def is_policy_domain_allowed(control_domain: str, policy_category: str) -> bool:
+    """
+    Return True if policy_category is allowed for this control_domain.
+
+    Rules:
+      - Domain filtering disabled → always True
+      - Control domain not in DOMAIN_PAIRS → always True (allow all for that control)
+      - Policy category not in ANY domain pair anywhere → True + warning collected
+        (new domain discovered — should be added to domain_pairs.json)
+      - Policy category in allowed list for this control → True
+      - Otherwise → False (blocked)
+    """
+    if not DOMAIN_PAIRS:
+        return True   # domain filtering disabled
+
+    allowed = get_allowed_policy_domains(control_domain)
+    if not allowed:
+        return True   # no mapping defined for this control domain → allow all
+
+    pol_cat = policy_category.strip().lower()
+
+    # Check if this policy category exists ANYWHERE in the domain pairs
+    # If not found anywhere → it is a NEW/UNKNOWN domain → allow + track
+    all_known_domains = {
+        d.lower()
+        for domains in DOMAIN_PAIRS.values()
+        for d in domains
+    }
+    is_known = any(
+        k in pol_cat or pol_cat in k
+        for k in all_known_domains
+    )
+    if not is_known and pol_cat:
+        _UNKNOWN_POLICY_DOMAINS.add(policy_category.strip())
+        return True   # unknown domain → allow through, user should add to pairs
+
+    return any(a in pol_cat or pol_cat in a for a in allowed)
 
 
 # ── Core Mapper ───────────────────────────────────────────────────────────────
@@ -1035,20 +1747,44 @@ class SSPMMapper:
         sim_matrix = norm(ctrl_vecs) @ norm(policy_vecs).T
         # sim_matrix[i][j] = cosine similarity between control i and policy j
 
+        # ── Build domain filter mask ──────────────────────────────────────────
+        # For each (control i, policy j) pair, check if the policy domain
+        # is allowed for this control's standard domain.
+        # Disallowed pairs are masked to 0.0 before scoring.
+        n_masked = 0
+        if DOMAIN_PAIRS:
+            domain_mask = np.ones((len(self.controls), len(self.policies)),
+                                   dtype=np.float32)
+            for i, ctrl in enumerate(self.controls):
+                for j, pol in enumerate(self.policies):
+                    if not is_policy_domain_allowed(ctrl.domain, pol.category):
+                        domain_mask[i, j] = 0.0
+                        n_masked += 1
+            sim_matrix = sim_matrix * domain_mask
+            pct = round(n_masked / (len(self.controls) * len(self.policies)) * 100)
+            print(f"     Domain filter: {n_masked} pairs masked ({pct}% of matrix) "
+                  f"— only allowed domain pairs compared.")
+            # Warn about any new policy domains not yet in domain_pairs.json
+            if _UNKNOWN_POLICY_DOMAINS:
+                print(f"\n  ⚠️   NEW POLICY DOMAINS DETECTED — not in domain_pairs.json:")
+                for ud in sorted(_UNKNOWN_POLICY_DOMAINS):
+                    print(f"       → '{ud}'  (allowed through — add to domain_pairs.json to control pairing)")
+                print()
+        else:
+            print(f"     Domain filter: disabled — all controls vs all policies.")
+
         # ── Forward pass: control → policies ─────────────────────────────────
         control_results: list[ControlResult] = []
-        # Track which policies got matched (for orphan detection)
         matched_policy_ids = set()
 
         for i, ctrl in enumerate(self.controls):
             raw_sims = sim_matrix[i]
 
             # ── Apply hybrid scoring ──────────────────────────────────────────
-            # For each policy, boost the raw embedding score with keyword +
-            # domain signals. This dramatically improves match quality when
-            # descriptions contain rich security terminology.
             boosted_sims = np.array([
                 hybrid_score(float(raw_sims[j]), ctrl, self.policies[j])
+                if raw_sims[j] > 0.0   # skip masked pairs entirely
+                else 0.0
                 for j in range(len(self.policies))
             ])
 
@@ -1148,6 +1884,7 @@ class SSPMMapper:
         report = {
             "app":              self.app_name or "Unknown App",
             "encoder_mode":     self.encoder.mode,
+            "unknown_policy_domains": sorted(_UNKNOWN_POLICY_DOMAINS),
             "summary": {
                 "total_controls":       len(self.controls),
                 "total_policies":       len(self.policies),
@@ -2217,12 +2954,225 @@ class SSPMMapper:
                               "D":6, "E":13, "F":42, "G":11, "H":14})
         ws8.freeze_panes = "A3"
 
+        # ═══════════════════════════════════════════════════════════════════════
+        # SHEET 9 — Domain Graph View
+        # Visual tree: Security Domain → Policy Domain → Policies
+        # ═══════════════════════════════════════════════════════════════════════
+        ws9 = wb.create_sheet("Domain Graph")
+        title_row(ws9, f"Domain Mapping Graph  |  {app}", 5)
+
+        # Colour palette for tree levels
+        C_L1 = "1F3864"   # Level 1 — Security Domain (navy)
+        C_L2 = "2E75B6"   # Level 2 — Policy Domain   (blue)
+        C_L3 = "D6E4F0"   # Level 3 — Policy name     (light blue)
+        C_UNK = "7F6000"  # Unknown domain             (amber)
+
+        # Column layout:
+        # A = Security Domain (std domain)
+        # B = connector  →
+        # C = Policy Domain (policy category)
+        # D = connector  →
+        # E = Policy ID
+        # F = Policy Name
+        # G = Coverage (from best match)
+        # H = Match Count
+
+        ws9.column_dimensions["A"].width = 28
+        ws9.column_dimensions["B"].width = 4
+        ws9.column_dimensions["C"].width = 22
+        ws9.column_dimensions["D"].width = 4
+        ws9.column_dimensions["E"].width = 14
+        ws9.column_dimensions["F"].width = 45
+        ws9.column_dimensions["G"].width = 12
+        ws9.column_dimensions["H"].width = 10
+
+        # Header row
+        g_hdrs = ["Security Domain","","Policy Domain","","Policy ID",
+                  "Policy Name","Best Coverage","Match Count"]
+        write_header_row(ws9, 2, g_hdrs, bg=C_HEADER_DARK, fg="FFFFFF")
+        ws9.freeze_panes = "A3"
+
+        # Build tree structure from control_mappings
+        # tree: { std_domain → { pol_category → [ {policy_id, policy_name, coverage, match_count} ] } }
+        from collections import defaultdict
+        tree = defaultdict(lambda: defaultdict(list))
+        pol_best = {}  # policy_id → best coverage across all controls
+
+        for cm in report["control_mappings"]:
+            std_dom = cm["domain"]
+            for m in cm["matches"]:
+                pol_cat = m.get("policy_category", "Uncategorised") or "Uncategorised"
+                pid     = m["policy_id"]
+                pname   = m["policy_name"]
+                cov     = m["coverage"]
+
+                # Track best coverage per policy
+                cov_rank = {"FULL": 3, "PARTIAL": 2, "INDIRECT": 1}
+                prev = pol_best.get(pid, {})
+                if cov_rank.get(cov, 0) >= cov_rank.get(prev.get("coverage",""), 0):
+                    pol_best[pid] = {
+                        "policy_id": pid,
+                        "policy_name": pname,
+                        "policy_category": pol_cat,
+                        "coverage": cov,
+                        "std_domains": set(),
+                    }
+                pol_best[pid]["std_domains"].add(std_dom)
+                tree[std_dom][pol_cat].append(pid)
+
+        # De-duplicate policy IDs per branch
+        for std_dom in tree:
+            for pol_cat in tree[std_dom]:
+                tree[std_dom][pol_cat] = sorted(set(tree[std_dom][pol_cat]))
+
+        # Also show domain pairs that have NO matches (empty branches)
+        for std_dom_key, allowed_cats in DOMAIN_PAIRS.items():
+            # Find matching control domain
+            matching = [cm["domain"] for cm in report["control_mappings"]
+                       if std_dom_key in cm["domain"].lower()
+                       or cm["domain"].lower() in std_dom_key]
+            display_dom = matching[0] if matching else std_dom_key.title()
+            for cat in allowed_cats:
+                if cat.title() not in tree.get(display_dom, {}):
+                    if display_dom not in tree:
+                        tree[display_dom] = {}
+                    if cat.title() not in tree[display_dom]:
+                        tree[display_dom][cat.title()] = []  # empty branch
+
+        g_row = 3
+        cov_colors = {"FULL": C_FULL, "PARTIAL": C_PARTIAL,
+                      "INDIRECT": C_INDIRECT_FG, "": "AAAAAA"}
+        cov_fg     = {"FULL": C_FULL_FG, "PARTIAL": C_PARTIAL_FG,
+                      "INDIRECT": "FFFFFF", "": "FFFFFF"}
+
+        for std_dom in sorted(tree.keys()):
+            pol_cats = tree[std_dom]
+            total_policies = sum(len(v) for v in pol_cats.values())
+
+            # ── Level 1: Security Domain header ──────────────────────────────
+            n_cat_rows = max(total_policies, 1)
+            ws9.merge_cells(start_row=g_row, start_column=1,
+                            end_row=g_row + n_cat_rows - 1, end_column=1)
+            l1 = ws9.cell(row=g_row, column=1, value=f"▶  {std_dom}")
+            l1.font      = Font(name="Arial", size=11, bold=True, color="FFFFFF")
+            l1.fill      = fill(C_L1)
+            l1.alignment = Alignment(horizontal="left", vertical="center",
+                                     indent=1, wrap_text=True)
+
+            cat_start_row = g_row
+
+            for pol_cat in sorted(pol_cats.keys()):
+                pol_ids   = pol_cats[pol_cat]
+                n_pol     = max(len(pol_ids), 1)
+                is_unknown = pol_cat.lower() not in {
+                    d.lower()
+                    for ds in DOMAIN_PAIRS.values() for d in ds
+                }
+
+                # ── Level 2: Policy Domain ────────────────────────────────────
+                ws9.merge_cells(start_row=cat_start_row, start_column=3,
+                                end_row=cat_start_row + n_pol - 1, end_column=3)
+                # Arrow from L1 to L2
+                ws9.merge_cells(start_row=cat_start_row, start_column=2,
+                                end_row=cat_start_row + n_pol - 1, end_column=2)
+                arr1 = ws9.cell(row=cat_start_row, column=2, value="──►")
+                arr1.font      = Font(name="Arial", size=10, color="2E75B6")
+                arr1.alignment = Alignment(horizontal="center", vertical="center")
+
+                l2_bg = C_UNK if is_unknown else C_L2
+                l2 = ws9.cell(row=cat_start_row, column=3,
+                              value=("⚠ " if is_unknown else "") + pol_cat)
+                l2.font      = Font(name="Arial", size=10, bold=True, color="FFFFFF")
+                l2.fill      = fill(l2_bg)
+                l2.alignment = Alignment(horizontal="left", vertical="center",
+                                         indent=1, wrap_text=True)
+
+                if not pol_ids:
+                    # Empty branch — no policies matched yet
+                    arr2e = ws9.cell(row=cat_start_row, column=4, value="──►")
+                    arr2e.font = Font(name="Arial", size=10, color="AAAAAA")
+                    arr2e.alignment = Alignment(horizontal="center", vertical="center")
+                    empty = ws9.cell(row=cat_start_row, column=5,
+                                     value="(no matches yet)")
+                    empty.font = Font(name="Arial", size=9, color="AAAAAA",
+                                      italic=True)
+                    for col in [6, 7, 8]:
+                        ws9.cell(row=cat_start_row, column=col).fill = fill("F5F5F5")
+                    ws9.row_dimensions[cat_start_row].height = 18
+                    cat_start_row += 1
+                else:
+                    # ── Level 3: Individual Policies ─────────────────────────
+                    for k, pid in enumerate(pol_ids):
+                        pd   = pol_best.get(pid, {})
+                        pname = pd.get("policy_name", pid)
+                        cov   = pd.get("coverage", "")
+
+                        # Arrow from L2 to L3
+                        arr2 = ws9.cell(row=cat_start_row, column=4,
+                                        value="──►" if k == 0 else "   ►")
+                        arr2.font = Font(name="Arial", size=10, color="2E75B6")
+                        arr2.alignment = Alignment(horizontal="center",
+                                                   vertical="center")
+
+                        # Policy ID
+                        pid_cell = ws9.cell(row=cat_start_row, column=5, value=pid)
+                        pid_cell.font      = body_font(bold=True)
+                        pid_cell.alignment = wrap_align("center")
+
+                        # Policy Name
+                        pn_cell = ws9.cell(row=cat_start_row, column=6, value=pname)
+                        pn_cell.font      = body_font()
+                        pn_cell.alignment = wrap_align()
+
+                        # Coverage badge
+                        cv_bg = cov_colors.get(cov, "AAAAAA")
+                        cv_fg = cov_fg.get(cov, "FFFFFF")
+                        cov_cell = ws9.cell(row=cat_start_row, column=7, value=cov or "—")
+                        cov_cell.fill      = fill(cv_bg)
+                        cov_cell.font      = Font(name="Arial", size=10,
+                                                  bold=True, color=cv_fg)
+                        cov_cell.alignment = Alignment(horizontal="center",
+                                                       vertical="center")
+
+                        # Match count (how many controls map to this policy)
+                        n_ctrl = len(pd.get("std_domains", set()))
+                        mc_cell = ws9.cell(row=cat_start_row, column=8,
+                                           value=n_ctrl if n_ctrl else "")
+                        mc_cell.font      = body_font()
+                        mc_cell.alignment = Alignment(horizontal="center")
+
+                        # Alternating row shading
+                        for col in [1, 2, 3, 4]:
+                            c = ws9.cell(row=cat_start_row, column=col)
+                            if not c.value:
+                                c.fill = fill(C_ALT_ROW if cat_start_row % 2 == 0
+                                              else "FFFFFF")
+                            c.border = border
+
+                        ws9.row_dimensions[cat_start_row].height = 18
+                        cat_start_row += 1
+
+            # Blank row between security domains
+            cat_start_row += 1
+            g_row = cat_start_row
+
+        # Add legend
+        legend_row = g_row + 1
+        ws9.merge_cells(start_row=legend_row, start_column=1,
+                        end_row=legend_row, end_column=8)
+        legend = ws9.cell(row=legend_row, column=1,
+                          value="Legend:  ▶ Security Domain  ──►  Policy Domain  ──►  Policy  |  "
+                                "Green=FULL  Amber=PARTIAL  Grey=INDIRECT  "
+                                "Amber header=NEW domain (add to domain_pairs.json)")
+        legend.font      = Font(name="Arial", size=9, italic=True, color="595959")
+        legend.alignment = Alignment(horizontal="left")
+
         # ── Save ──────────────────────────────────────────────────────────────
         wb.save(path)
         print(f"📊  Excel report saved to {path}")
         print(f"     Sheets: Summary | Control Mappings | Policy Mappings |")
         print(f"             Uncovered Controls | Orphan Policies | Relationships |")
-        print(f"             One-to-Many | Mind Map")
+        print(f"             One-to-Many | Mind Map | Domain Graph")
 
 
     def save_csv(self, report: dict, prefix: str = "mapping"):
@@ -2572,6 +3522,14 @@ def parse_args():
                    action="store_true",
                    help="Delete all cached policy embeddings before running\n"
                         "Use when switching policy files or SecBERT model")
+    p.add_argument("--no-domain-filter",
+                   action="store_true",
+                   help="Disable domain pairing filter — compare all controls vs all policies\n"
+                        "Use this to see all possible matches regardless of domain")
+    p.add_argument("--domain-pairs", "-d",
+                   default=None,
+                   help="Path to JSON file with custom domain pairing map\n"
+                        "Format: {\"Standard Domain\": [\"Policy Domain 1\", ...]}")
     return p.parse_args()
 
 
@@ -2630,9 +3588,22 @@ def main():
     # ── Run mapper ────────────────────────────────────────────────────────────
     mapper = SSPMMapper(model_path=args.model)
 
-    # Clear cache if requested or if a fresh start is needed
+    # Clear cache if requested
     if getattr(args, 'clear_cache', False):
         mapper.cache.clear()
+
+    # Handle domain filter options
+    if getattr(args, 'no_domain_filter', False):
+        import sspm_mapper as _sm
+        _sm.DOMAIN_PAIRS.clear()
+        print("ℹ️   Domain filter disabled — all controls vs all policies.\n")
+    elif getattr(args, 'domain_pairs', None):
+        import json as _json, sspm_mapper as _sm
+        custom = _json.load(open(args.domain_pairs))
+        _sm.DOMAIN_PAIRS.clear()
+        _sm.DOMAIN_PAIRS.update(custom)
+        print(f"ℹ️   Domain pairs loaded from {args.domain_pairs} "
+              f"({len(_sm.DOMAIN_PAIRS)} standard domains)\n")
 
     mapper.load_controls(controls_file)
     mapper.load_policies(policies_file, app=app_name)
