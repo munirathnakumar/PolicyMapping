@@ -1035,18 +1035,21 @@ class SSPMMapper:
             ))
 
         # ── Reverse pass: policy → controls ──────────────────────────────────
+        # Derived directly from forward pass results — a policy is orphan
+        # only if it appears in NO control's matches list.
+        # This is the single source of truth and is consistent with the
+        # two-pass domain-filtered scoring used in the forward pass.
+
+        # Build: policy_id → list of control_ids that matched it
+        pol_to_ctrls: dict = {}
+        for cr in control_results:
+            for m in cr.matches:
+                pol_to_ctrls.setdefault(m.policy_id, []).append(cr.control_id)
+
         policy_results: list[PolicyResult] = []
-
-        for j, pol in enumerate(self.policies):
-            sims = sim_matrix[:, j]   # all controls vs this policy
-            matched_ctrl_ids = []
-
-            for i, ctrl in enumerate(self.controls):
-                score = float(sims[i])
-                if score >= THRESHOLD_INDIRECT:
-                    matched_ctrl_ids.append(ctrl.control_id)
-
-            is_orphan = len(matched_ctrl_ids) == 0
+        for pol in self.policies:
+            matched_ctrl_ids = pol_to_ctrls.get(pol.policy_id, [])
+            is_orphan        = len(matched_ctrl_ids) == 0
             policy_results.append(PolicyResult(
                 policy_id        = pol.policy_id,
                 policy_name      = pol.policy_name,
