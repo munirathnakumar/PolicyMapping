@@ -62,6 +62,7 @@ class PolicyMatch:
     impact:           str = "" # impact value carried from policy file
     confidence:       str = "" # HIGH / MEDIUM / LOW — match confidence flag
     match_source:     str = "" # "domain_paired" | "cross_domain" | "unfiltered"
+    description:      str = "" # policy description text
 
 @dataclass
 class ControlResult:
@@ -81,6 +82,7 @@ class PolicyResult:
     policy_id:       str
     policy_name:     str
     policy_category: str
+    description:     str  = ""    # policy description text
     matched_controls: list = field(default_factory=list)  # list of control_ids
     is_orphan:       bool = True   # True if no control maps to this policy
 
@@ -1046,6 +1048,7 @@ class SSPMMapper:
                     impact           = pol.impact,
                     confidence       = confidence,
                     match_source     = match_source[j],
+                    description      = pol.description,
                 ))
                 matched_policy_ids.add(pol.policy_id)
 
@@ -1082,6 +1085,7 @@ class SSPMMapper:
                 policy_id        = pol.policy_id,
                 policy_name      = pol.policy_name,
                 policy_category  = pol.category,
+                description      = pol.description,
                 matched_controls = matched_ctrl_ids,
                 is_orphan        = is_orphan,
             ))
@@ -1134,6 +1138,7 @@ class SSPMMapper:
                     "policy_id":       r.policy_id,
                     "policy_name":     r.policy_name,
                     "policy_category": r.policy_category,
+                    "description":     r.description,
                     "reason":          "No org control maps to this OOTB policy",
                 }
                 for r in orphan_policies
@@ -1394,6 +1399,7 @@ class SSPMMapper:
                     "impact":           m.impact,
                     "confidence":       m.confidence,
                     "match_source":     m.match_source,
+                    "description":      m.description,
                 }
                 for m in r.matches
             ],
@@ -1404,6 +1410,7 @@ class SSPMMapper:
             "policy_id":         r.policy_id,
             "policy_name":       r.policy_name,
             "policy_category":   r.policy_category,
+            "description":       r.description,
             "matched_controls":  r.matched_controls,
             "match_count":       len(r.matched_controls),
             "is_orphan":         r.is_orphan,
