@@ -834,8 +834,8 @@ window.runMapping = async function(){
     // Parse locally, no server needed
     const cr=_csvCtrl.name.endsWith('.json')?JSON.parse(_csvCtrl.txt):parseCSV(_csvCtrl.txt);
     const pr=_csvPol.name.endsWith('.json')?JSON.parse(_csvPol.txt):parseCSV(_csvPol.txt);
-    const cl=cr.map((r,i)=>({id:r.control_id||r.id||r.ctrl_id||r.ref||`CTR-${pad(i+1)}`,text:r.control_text||r.control||r.requirement||'',domain:r.domain||r.security_domain||'General',fw:r.framework||r.standard||''})).filter(c=>c.text);
-    const pl=pr.map((r,i)=>({id:r.policy_id||r.id||r.pol_id||r.ref||`POL-${pad(i+1)}`,name:r.policy_name||r.policy||r.name||'',cat:r.category||r.type||'',desc:r.description||r.desc||'',impact:r.impact||''})).filter(p=>p.name);
+    const cl=cr.map((r,i)=>({id:r.control_id||r.id||r.ctrl_id||r.ref||`CTR-${pad(i+1)}`,text:r.control_text||r.control||r.requirement||r.specification||r.text||'',domain:r.domain||r.security_domain||r.category||'General',fw:r.framework||r.standard||r.source||''})).filter(c=>c.text);
+    const pl=pr.map((r,i)=>({id:r.policy_id||r.id||r.pol_id||r.ref||`POL-${pad(i+1)}`,name:r.policy_name||r.policy||r.name||'',cat:r.category||r.type||'',desc:r.description||r.desc||r.detail||r.details||r.policy_description||r.specification||r.spec||r.notes||'',impact:r.impact||r.impact_level||r.severity||''})).filter(p=>p.name);
     loadState({app,control_mappings:cl.map(c=>({control_id:c.id,control_text:c.text,domain:c.domain,framework:c.fw,matches:[]})),orphan_policies:pl.map(p=>({policy_id:p.id,policy_name:p.name,policy_category:p.cat,description:p.desc}))});
     toast(`Loaded ${cl.length} controls · ${pl.length} policies — manual mode`);
     showApp();

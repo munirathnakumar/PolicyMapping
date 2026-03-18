@@ -300,6 +300,34 @@ class PolicyLoader:
         raise ValueError(f"Unsupported format '{ext}'")
 
 
+
+def _find_model_path(base_path: str) -> str:
+    """
+    Resolve the exact directory containing SecBERT config.json.
+    Handles two folder layouts:
+      1. Flat:          ./secbert_clean/config.json
+      2. HuggingFace:   ./secbert_clean/models--jackaduma--SecBERT/snapshots/<hash>/config.json
+    Raises FileNotFoundError if config.json cannot be located.
+    """
+    from pathlib import Path
+
+    p = Path(base_path)
+
+    # Layout 1 — config.json directly inside the given folder
+    if (p / "config.json").exists():
+        return str(p.resolve())
+
+    # Layout 2 — HuggingFace cache structure (snapshots/<hash>/config.json)
+    for cfg in p.rglob("config.json"):
+        return str(cfg.parent.resolve())
+
+    raise FileNotFoundError(
+        f"SecBERT model not found in '{base_path}'.\n"
+        f"Make sure config.json exists inside that folder.\n"
+        f"Run:  python download_secbert.py\n"
+        f"Then set SECBERT_MODEL_PATH = './secbert_clean' in sspm_config.py"
+    )
+
 # ── Encoder ───────────────────────────────────────────────────────────────────
 
 
