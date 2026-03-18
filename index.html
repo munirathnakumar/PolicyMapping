@@ -384,6 +384,31 @@ button,input,select{font-family:var(--ff);cursor:pointer}
   color:var(--t2);cursor:pointer;transition:all .15s;flex-shrink:0;font-size:15px;line-height:1;
 }
 .tb-theme:hover{border-color:var(--A);color:var(--A);background:var(--A1)}
+
+/* ── Hover tooltip ──────────────────────────────────────────────────────── */
+.tt-wrap{position:relative;display:contents}
+.tt{
+  position:fixed;z-index:8000;
+  max-width:340px;min-width:180px;
+  background:var(--c0);
+  border:1px solid var(--G2);
+  border-radius:var(--rl);
+  padding:10px 13px;
+  pointer-events:none;
+  opacity:0;
+  transition:opacity .15s;
+  box-shadow:0 8px 32px rgba(0,0,0,.55);
+  font-family:var(--ff);
+}
+.tt.show{opacity:1}
+.tt-name{font-size:12px;font-weight:600;color:var(--t1);margin-bottom:5px;line-height:1.4}
+.tt-id{font-family:var(--fm);font-size:10px;color:var(--G);margin-bottom:4px}
+.tt-cat{font-family:var(--fm);font-size:10px;color:var(--t3);margin-bottom:6px}
+.tt-desc{font-size:12px;color:var(--t2);line-height:1.6;border-top:1px solid var(--b1);padding-top:6px}
+.tt-impact{display:inline-block;font-family:var(--fm);font-size:10px;margin-top:6px;padding:2px 8px;border-radius:8px}
+.tt-impact-HIGH{background:var(--R1);color:var(--R);border:1px solid var(--R2)}
+.tt-impact-MEDIUM{background:var(--A1);color:var(--A);border:1px solid var(--A2)}
+.tt-impact-LOW{background:var(--G1);color:var(--G);border:1px solid var(--G2)}
 </style>
 </head>
 <body>
@@ -658,6 +683,7 @@ button,input,select{font-family:var(--ff);cursor:pointer}
   </div>
 </div>
 
+<div class="tt" id="tt" role="tooltip"></div>
 <div class="ghost" id="ghost"></div>
 <div class="toast" id="toast"></div>
 
@@ -1038,7 +1064,7 @@ function buildChip(ctrlId,ch){
   const cv=ch.manual?'M':ch.cov;
   const cls=ch.removed?'chip chip-rm':`chip chip-${cv}`;
   return `<span class="${cls}" id="chip-${sA(ctrlId)}-${sA(ch.polId)}" draggable="${!ch.removed}"
-    title="${hE(pol.desc||pol.name)}"
+    data-pol="${sA(ch.polId)}"
     ondragstart="onChipDS(event,'${sJ(ctrlId)}','${sJ(ch.polId)}')"
     ondragend="dragEnd()">
     <span class="chip-dot"></span>
@@ -1088,7 +1114,7 @@ window.renderPolicies = renderPolicies;
 function renderTray(){
   const all=[...S.orphans.map(o=>({...o,isRm:false})),...S.removed.map(r=>{const p=S.pols[r.polId]||{};return{id:r.polId,name:p.name||r.polId,cat:p.cat||'',isRm:true};})];
   $('tray-count').textContent=all.length;
-  $('tray-bd').innerHTML=all.map(o=>`<span class="oc${o.isRm?' oc-rm':''}" id="oc-${sA(o.id)}" draggable="true"
+  $('tray-bd').innerHTML=all.map(o=>`<span class="oc${o.isRm?' oc-rm':''}" id="oc-${sA(o.id)}" data-pol-id="${sA(o.id)}" draggable="true"
     ondragstart="onOrphanDS(event,'${sJ(o.id)}','${sJ(o.name)}')" ondragend="dragEnd()">
     <span>${hE(o.name)}</span>
     ${o.cat?`<span class="oc-cat">${hE(o.cat)}</span>`:''}
@@ -1686,6 +1712,78 @@ window.toggleTheme = function(){
   if(btn) btn.textContent = _isDark ? '🌙' : '☀️';
   setTimeout(drawSVG, 60);
 };
+
+
+/* ── Tooltip logic ─────────────────────────────────────────────────────────── */
+const _tt_el = document.getElementById('tt');
+let _tt_hide_t;
+
+function showTT(e, pol) {
+  clearTimeout(_tt_hide_t);
+  if (!pol) return;
+  const iv = (pol.impact || '').toUpperCase();
+  const impactCls = iv.includes('HIGH') ? 'HIGH' : iv.includes('MEDIUM') ? 'MEDIUM' : iv.includes('LOW') ? 'LOW' : '';
+  _tt_el.innerHTML =
+    `<div class="tt-id">${hE(pol.id)}</div>` +
+    `<div class="tt-name">${hE(pol.name)}</div>` +
+    (pol.cat  ? `<div class="tt-cat">${hE(pol.cat)}</div>` : '') +
+    (pol.desc ? `<div class="tt-desc">${hE(pol.desc)}</div>` : '') +
+    (pol.impact && impactCls ? `<span class="tt-impact tt-impact-${impactCls}">${hE(pol.impact)}</span>` : '');
+  _tt_el.classList.add('show');
+  moveTT(e);
+}
+
+function moveTT(e) {
+  if (!_tt_el.classList.contains('show')) return;
+  const vw = window.innerWidth, vh = window.innerHeight;
+  const tw = _tt_el.offsetWidth  || 300;
+  const th = _tt_el.offsetHeight || 120;
+  let x = e.clientX + 16;
+  let y = e.clientY + 16;
+  if (x + tw > vw - 12) x = e.clientX - tw - 12;
+  if (y + th > vh - 12) y = e.clientY - th - 12;
+  _tt_el.style.left = x + 'px';
+  _tt_el.style.top  = y + 'px';
+}
+
+function hideTT() {
+  _tt_hide_t = setTimeout(() => _tt_el.classList.remove('show'), 80);
+}
+
+/* attach to policy cards via event delegation */
+document.getElementById('pol-list').addEventListener('mouseover', e => {
+  const card = e.target.closest('.pc');
+  if (!card) { hideTT(); return; }
+  const pol = S.pols[card.dataset.polId];
+  showTT(e, pol);
+});
+document.getElementById('pol-list').addEventListener('mousemove', moveTT);
+document.getElementById('pol-list').addEventListener('mouseleave', hideTT);
+
+/* attach to chips inside standard cards via event delegation */
+document.getElementById('std-list').addEventListener('mouseover', e => {
+  const chip = e.target.closest('.chip');
+  if (!chip) { hideTT(); return; }
+  const polId = chip.dataset && chip.dataset.pol ? chip.dataset.pol : null;
+  if (!polId) { hideTT(); return; }
+  // polId is the sanitised version - find real polId
+  const pol = Object.values(S.pols).find(p => sA(p.id) === polId) || S.pols[polId];
+  showTT(e, pol);
+});
+document.getElementById('std-list').addEventListener('mousemove', moveTT);
+document.getElementById('std-list').addEventListener('mouseleave', hideTT);
+
+/* attach to orphan tray chips */
+document.getElementById('tray-bd').addEventListener('mouseover', e => {
+  const chip = e.target.closest('.oc');
+  if (!chip) { hideTT(); return; }
+  const polId = chip.dataset.polId || chip.id.replace('oc-','');
+  // find real pol by sanitised id match
+  const pol = Object.values(S.pols).find(p => sA(p.id) === polId) || S.pols[polId];
+  showTT(e, pol);
+});
+document.getElementById('tray-bd').addEventListener('mousemove', moveTT);
+document.getElementById('tray-bd').addEventListener('mouseleave', hideTT);
 
 }); /* end DOMContentLoaded */
 </script>
