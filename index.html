@@ -294,7 +294,10 @@ button,input,select{font-family:var(--ff);cursor:pointer}
 .tray-bd{display:flex;flex-wrap:wrap;gap:6px;padding:0 16px 12px;max-height:110px;
   overflow-y:auto;transition:max-height .25s,padding .25s}
 .tray-bd.closed{max-height:0;padding-bottom:0;overflow:hidden}
-.oc{display:inline-flex;align-items:center;gap:6px;padding:5px 11px;background:var(--c2);
+.oc-name{font-size:12px;font-weight:500;line-height:1.3}
+.oc-desc{font-size:10px;color:var(--t2);line-height:1.4;margin-top:2px;
+  display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;max-width:200px}
+.oc{display:flex;flex-direction:column;gap:1px;padding:7px 11px;background:var(--c2);
   border:1px solid var(--b2);border-radius:var(--r);font-size:12px;font-weight:500;
   cursor:grab;transition:all .12s;user-select:none}
 .oc:hover{background:var(--c3);border-color:var(--b3);transform:translateY(-1px)}
@@ -612,6 +615,7 @@ button,input,select{font-family:var(--ff);cursor:pointer}
         <select class="col-select" id="dom-filter" onchange="renderStandards();setTimeout(drawSVG,50)">
           <option value="">All security domains</option>
         </select>
+        <input class="col-search" id="std-search" placeholder="Search controls…" oninput="renderStandards();setTimeout(drawSVG,50)">
       </div>
       <div class="col-scroll" id="std-list"></div>
     </div>
@@ -702,6 +706,59 @@ let _selectedModel = 'secbert';
 let _serverOk = false;
 let _csvCtrl = null, _csvPol = null, _jsonRaw = null, _xlsxBuf = null;
 let _dragData = null, _isDragging = false;
+
+/* ════════════════════════════════════════════════════════════════════════════
+   STATE PERSISTENCE — auto-save to localStorage on every change
+   Survives page refresh. Cleared on "New Session".
+════════════════════════════════════════════════════════════════════════════ */
+const STORAGE_KEY = 'sspm_mapper_state_v1';
+
+function persistState() {
+  try {
+    const snapshot = {
+      app:      S.app,
+      controls: S.controls,   // includes all chips with removed/manual flags
+      pols:     S.pols,
+      orphans:  S.orphans,
+      removed:  S.removed,
+      moved:    S.moved,
+    };
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(snapshot));
+  } catch(e) {
+    // Ignore quota errors silently
+  }
+}
+
+function restoreState() {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY);
+    if (!raw) return false;
+    const snap = JSON.parse(raw);
+    if (!snap || !snap.app || !snap.controls) return false;
+    S.app      = snap.app;
+    S.controls = snap.controls;
+    S.pols     = snap.pols     || {};
+    S.orphans  = snap.orphans  || [];
+    S.removed  = snap.removed  || [];
+    S.moved    = snap.moved    || [];
+    return true;
+  } catch(e) {
+    return false;
+  }
+}
+
+function clearPersistedState() {
+  try { localStorage.removeItem(STORAGE_KEY); } catch(e) {}
+}
+
+// Wrap render() to auto-save after every UI change
+const _renderOriginal = render;
+function render() {
+  _renderOriginal();
+  persistState();
+}
+
+
 
 /* ════════════════════════════════════════════════════════════════════════════
    HELPERS
@@ -797,6 +854,12 @@ async function checkServer(){
 }
 
 // Run on load + after selecting model
+// Restore any previously saved session
+if (restoreState()) {
+  // Had saved state — go straight to mapper
+  showApp();
+  toast('Session restored — ' + S.controls.length + ' controls loaded', 3500);
+}
 setTimeout(()=>{ checkServer(); updateInfoBar(); }, 600);
 
 /* ════════════════════════════════════════════════════════════════════════════
@@ -911,6 +974,7 @@ function loadState(rpt){
     chips:(cm.matches||[]).map(m=>({polId:m.policy_id,cov:(m.coverage||'PARTIAL').toUpperCase()[0],src:m.match_source||'',manual:false,removed:false}))
   }));
   S.orphans=(rpt.orphan_policies||[]).map(p=>({id:p.policy_id,name:p.policy_name||p.policy_id,cat:p.policy_category||'',desc:p.description||''}));
+  persistState();
 }
 
 window.loadJSONFile=function(){try{loadState(JSON.parse(_jsonRaw));showApp();}catch(e){alert('JSON error: '+e.message);}};
@@ -970,6 +1034,7 @@ window.newSession = function(){
   ['f-ctrl','f-pol','f-json','f-xlsx'].forEach(id=>{const el=$(id);if(el)el.value='';});
   $('csv-app').value='';
   updateRunButton();
+  clearPersistedState();
   $('pg-app').style.display='none';
   $('pg-upload').style.display='';
   switchMode('csv');
@@ -1017,8 +1082,14 @@ function buildDomFilters(){
 /* standards */
 function renderStandards(){
   const domF=$('dom-filter').value;
+  const q=($('std-search')?.value||'').toLowerCase().trim();
   const list=$('std-list'); list.innerHTML='';
-  const vis=domF?S.controls.filter(c=>c.domain===domF):S.controls;
+  const vis=S.controls.filter(c=>{
+    if(domF && c.domain!==domF) return false;
+    if(q && !c.id.toLowerCase().includes(q) && !c.text.toLowerCase().includes(q)
+         && !c.domain.toLowerCase().includes(q) && !c.fw.toLowerCase().includes(q)) return false;
+    return true;
+  });
   $('std-count').textContent=vis.length;
   vis.forEach((c,i)=>{const el=buildStdCard(c);el.style.animationDelay=`${i*0.025}s`;list.appendChild(el);});
 }
@@ -1084,7 +1155,7 @@ function renderPolicies(){
   let n=0;
   Object.values(S.pols).forEach(pol=>{
     if(domF&&pol.cat.toLowerCase()!==domF)return;
-    if(q&&!pol.name.toLowerCase().includes(q)&&!pol.id.toLowerCase().includes(q)&&!pol.cat.toLowerCase().includes(q))return;
+    if(q&&!pol.name.toLowerCase().includes(q)&&!pol.id.toLowerCase().includes(q)&&!pol.cat.toLowerCase().includes(q)&&!(pol.desc||'').toLowerCase().includes(q))return;
     const isA=assigned.has(pol.id);
     let cv='',cross=false;
     if(isA){for(const c of S.controls){const ch=c.chips.find(x=>x.polId===pol.id&&!x.removed);if(ch){cv=ch.manual?'M':ch.cov;cross=ch.src==='cross_domain';break;}}}
@@ -1114,12 +1185,17 @@ window.renderPolicies = renderPolicies;
 function renderTray(){
   const all=[...S.orphans.map(o=>({...o,isRm:false})),...S.removed.map(r=>{const p=S.pols[r.polId]||{};return{id:r.polId,name:p.name||r.polId,cat:p.cat||'',isRm:true};})];
   $('tray-count').textContent=all.length;
-  $('tray-bd').innerHTML=all.map(o=>`<span class="oc${o.isRm?' oc-rm':''}" id="oc-${sA(o.id)}" data-pol-id="${sA(o.id)}" draggable="true"
-    ondragstart="onOrphanDS(event,'${sJ(o.id)}','${sJ(o.name)}')" ondragend="dragEnd()">
-    <span>${hE(o.name)}</span>
-    ${o.cat?`<span class="oc-cat">${hE(o.cat)}</span>`:''}
-    ${o.isRm?`<span class="oc-cat" style="color:var(--R)">removed</span>`:''}
-  </span>`).join('');
+  $('tray-bd').innerHTML=all.map(o=>{
+    const pol=S.pols[o.id]||{};
+    const desc=o.desc||pol.desc||'';
+    return `<span class="oc${o.isRm?' oc-rm':''}" id="oc-${sA(o.id)}" data-pol-id="${sA(o.id)}" draggable="true"
+      ondragstart="onOrphanDS(event,'${sJ(o.id)}','${sJ(o.name)}')" ondragend="dragEnd()">
+      <div class="oc-name">${hE(o.name)}</div>
+      ${o.cat?`<div class="oc-cat">${hE(o.cat)}</div>`:''}
+      ${desc?`<div class="oc-desc">${hE(desc)}</div>`:''}
+      ${o.isRm?`<div class="oc-cat" style="color:var(--R)">manually removed</div>`:''}
+    </span>`;
+  }).join('');
 }
 window.toggleTray=function(){$('tray-bd').classList.toggle('closed');$('tray-tog').classList.toggle('up');};
 
@@ -1275,9 +1351,27 @@ window.dlJSONDirect = function(){
 };
 
 function buildReportObj(){
+  // Deduplicate S.removed by ctrlId+polId key (same policy can be removed from multiple controls)
+  const removedUniq = Object.values(
+    S.removed.reduce((acc,r)=>{ acc[r.ctrlId+'|'+r.polId]=r; return acc; }, {})
+  );
+  // Policies still assigned somewhere should NOT appear in orphan list
+  const assignedPolIds = new Set(
+    S.controls.flatMap(c => c.chips.filter(ch=>!ch.removed).map(ch=>ch.polId))
+  );
   const orphans=[
-    ...S.orphans.map(o=>({policy_id:o.id,policy_name:o.name,policy_category:o.cat,reason:'No org control maps to this policy'})),
-    ...S.removed.map(r=>{const p=S.pols[r.polId]||{};return{policy_id:r.polId,policy_name:p.name||r.polId,policy_category:p.cat||'',reason:'Manually removed — wrongly mapped by reviewer'};}),
+    ...S.orphans
+      .filter(o => !assignedPolIds.has(o.id))
+      .map(o=>({policy_id:o.id, policy_name:o.name, policy_category:o.cat,
+                description:o.desc||'', reason:'No org control maps to this policy'})),
+    ...removedUniq
+      .filter(r => !assignedPolIds.has(r.polId))
+      .map(r=>{
+        const p=S.pols[r.polId]||{};
+        return {policy_id:r.polId, policy_name:p.name||r.polId,
+                policy_category:p.cat||'', description:p.desc||'',
+                reason:'Manually removed — wrongly mapped by reviewer'};
+      }),
   ];
   let f=0,p=0,i=0,cov=0,unc=0;
   const domStats={};
@@ -1494,12 +1588,12 @@ async function doExcel(keys){
   /* ── Orphan ── */
   if(keys.includes('orphan')){
     const ws=wb.addWorksheet('Orphan Policies');
-    titRow(ws,`Orphan Policies — Not Required by Any Standard  |  ${app}`,4);
-    hdrRow(ws,2,['Policy ID','Policy Name','Policy Category','Reason']);
+    titRow(ws,`Orphan Policies — Not Required by Any Standard  |  ${app}`,5);
+    hdrRow(ws,2,['Policy ID','Policy Name','Policy Category','Description','Reason']);
     ws.views=[{state:'frozen',ySplit:2,activeCell:'A3'}];
     if(!rpt.orphan_policies.length){xC(ws,3,1).value='✅  All policies are referenced.';xC(ws,3,1).font=xFont(10,true,'FF276221');}
-    rpt.orphan_policies.forEach((op,i)=>dataRow(ws,3+i,[op.policy_id,op.policy_name,op.policy_category,op.reason],i%2===1));
-    colWid(ws,{A:12,B:45,C:20,D:50});
+    rpt.orphan_policies.forEach((op,i)=>dataRow(ws,3+i,[op.policy_id,op.policy_name,op.policy_category,op.description||'',op.reason],i%2===1));
+    colWid(ws,{A:12,B:40,C:18,D:50,E:50});
   }
 
   /* ── Relationships ── */
