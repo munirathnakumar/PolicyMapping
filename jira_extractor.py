@@ -19,6 +19,8 @@ from openpyxl.utils import get_column_letter
 # Config loader
 # ──────────────────────────────────────────────────────────────────────────────
 
+VALID_TYPES = {"text", "date", "number", "user", "array"}
+
 def load_config(path: str) -> dict:
     cfg_path = Path(path)
     if not cfg_path.exists():
@@ -26,14 +28,25 @@ def load_config(path: str) -> dict:
     with cfg_path.open("r", encoding="utf-8") as f:
         cfg = json.load(f)
 
-    required = {
-        "jira.url", "jira.email", "jira.token",
-        "project.key", "project.output",
-    }
-    for key in required:
+    # Required keys
+    for key in ("jira.url", "jira.email", "jira.token",
+                "project.key", "project.output"):
         section, field = key.split(".")
         if not cfg.get(section, {}).get(field):
             raise ValueError(f"Missing required config key: {key}")
+
+    # Validate custom_fields entries
+    for cf in cfg.get("custom_fields", []):
+        if not cf.get("id"):
+            raise ValueError(f"custom_fields entry missing 'id': {cf}")
+        if not cf.get("label"):
+            raise ValueError(f"custom_fields entry missing 'label': {cf}")
+        cf_type = cf.get("type", "text")
+        if cf_type not in VALID_TYPES:
+            raise ValueError(
+                f"custom_fields '{cf['id']}' has invalid type '{cf_type}'. "
+                f"Must be one of: {', '.join(VALID_TYPES)}"
+            )
 
     return cfg
 
@@ -66,14 +79,14 @@ def setup_logging(cfg: dict) -> logging.Logger:
 
 class JiraClient:
     def __init__(self, cfg: dict, logger: logging.Logger):
-        jira_cfg    = cfg["jira"]
-        fetch_cfg   = cfg.get("fetch", {})
-        self.base   = jira_cfg["url"].rstrip("/")
-        self.auth   = HTTPBasicAuth(jira_cfg["email"], jira_cfg["token"])
-        self.max_results  = int(fetch_cfg.get("max_results", 100))
-        self.timeout      = int(fetch_cfg.get("timeout_secs", 30))
-        self.logger  = logger
-        self.session = self._build_session()
+        jira_cfg         = cfg["jira"]
+        fetch_cfg        = cfg.get("fetch", {})
+        self.base        = jira_cfg["url"].rstrip("/")
+        self.auth        = HTTPBasicAuth(jira_cfg["email"], jira_cfg["token"])
+        self.max_results = int(fetch_cfg.get("max_results", 100))
+        self.timeout     = int(fetch_cfg.get("timeout_secs", 30))
+        self.logger      = logger
+        self.session     = self._build_session()
 
     def _build_session(self) -> requests.Session:
         session = requests.Session()
@@ -93,20 +106,18 @@ class JiraClient:
         return session
 
     def fetch_all(self, jql: str, fields: list[str]) -> list[dict]:
-        """Paginate Jira search/jql (POST) and return all matching issues.
-
-        Endpoint : POST /rest/api/3/search/jql
-        Pagination: cursor-based via 'nextPageToken' in the response body.
-        Docs      : https://developer.atlassian.com/cloud/jira/platform/rest/v3/api-group-issue-search/#api-rest-api-3-search-jql-post
         """
-        issues         = []
+        Paginate POST /rest/api/3/search/jql and return all matching issues.
+        Uses cursor-based pagination via nextPageToken.
+        """
+        issues          = []
         next_page_token = None
-        self.logger.debug("JQL: %s", jql)
+        self.logger.debug("JQL: %s | fields: %s", jql, fields)
 
         while True:
             payload: dict = {
-                "jql":       jql,
-                "fields":    fields,
+                "jql":        jql,
+                "fields":     fields,
                 "maxResults": self.max_results,
             }
             if next_page_token:
@@ -123,7 +134,6 @@ class JiraClient:
             issues.extend(batch)
             self.logger.debug("Fetched %d issues so far", len(issues))
 
-            # nextPageToken is absent (or null) on the last page
             next_page_token = data.get("nextPageToken")
             if not next_page_token or not batch:
                 break
@@ -132,7 +142,7 @@ class JiraClient:
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Field helpers
+# Field value extractors
 # ──────────────────────────────────────────────────────────────────────────────
 
 def gf(issue: dict, *keys, default=""):
@@ -146,7 +156,6 @@ def gf(issue: dict, *keys, default=""):
 
 
 def first_value(issue: dict, field_ids: list[str], default=""):
-    """Return the first non-null value among a list of custom field IDs."""
     for fid in field_ids:
         val = gf(issue, fid)
         if val not in (None, "", {}):
@@ -195,8 +204,55 @@ def get_due_date(issue: dict, field_ids: list[str]) -> str:
     return fmt_date(first_value(issue, field_ids))
 
 
+def resolve_custom_field(issue: dict, field_id: str, field_type: str) -> str:
+    """
+    Extract a custom field value and coerce it to a display string
+    based on its declared type in config.
+
+    Supported types:
+        text   — plain string or nested .value / .name
+        date   — ISO date string → DD-MMM-YYYY
+        number — numeric value as-is
+        user   — Jira user object → displayName
+        array  — list of strings or objects → comma-separated
+    """
+    raw = gf(issue, field_id)
+
+    if raw in (None, "", {}, []):
+        return ""
+
+    if field_type == "date":
+        return fmt_date(raw)
+
+    if field_type == "number":
+        return str(raw)
+
+    if field_type == "user":
+        if isinstance(raw, dict):
+            return raw.get("displayName", raw.get("name", ""))
+        return str(raw)
+
+    if field_type == "array":
+        if isinstance(raw, list):
+            parts = []
+            for item in raw:
+                if isinstance(item, dict):
+                    parts.append(item.get("value") or item.get("name") or
+                                 item.get("displayName") or str(item))
+                else:
+                    parts.append(str(item))
+            return ", ".join(parts)
+        return str(raw)
+
+    # text (default) — handle nested option objects
+    if isinstance(raw, dict):
+        return raw.get("value") or raw.get("name") or raw.get("displayName") or str(raw)
+
+    return str(raw)
+
+
 # ──────────────────────────────────────────────────────────────────────────────
-# Style constants
+# Style helpers
 # ──────────────────────────────────────────────────────────────────────────────
 
 C_EPIC_BG  = "4A154B"
@@ -218,19 +274,19 @@ STATUS_COLOURS = {
     "in review":   C_INPROG,
 }
 
-COLS = [
-    ("Epic",          22),
-    ("Story Key",     12),
-    ("Story Summary", 52),
-    ("Status",        14),
-    ("Assignee",      22),
-    ("Priority",      12),
-    ("Story Points",  13),
-    ("Start Date",    14),
-    ("Due Date",      14),
-    ("Labels",        26),
+# Fixed columns — custom_fields are appended after these at runtime
+FIXED_COLS = [
+    ("Epic",          22),   # A — merged per epic
+    ("Story Key",     12),   # B
+    ("Story Summary", 52),   # C
+    ("Status",        14),   # D
+    ("Assignee",      22),   # E
+    ("Priority",      12),   # F
+    ("Story Points",  13),   # G
+    ("Start Date",    14),   # H
+    ("Due Date",      14),   # I
+    ("Labels",        26),   # J
 ]
-NUM_COLS = len(COLS)
 
 
 def mk_fill(hex_col: str) -> PatternFill:
@@ -257,19 +313,31 @@ def status_colour(status: str) -> str:
 # ──────────────────────────────────────────────────────────────────────────────
 
 def build_workbook(epics: list, story_map: dict,
-                   project_key: str, fields_cfg: dict) -> Workbook:
+                   project_key: str, fields_cfg: dict,
+                   custom_fields: list[dict]) -> Workbook:
+    """
+    custom_fields: list of dicts from config, e.g.
+        [{"id": "customfield_10050", "label": "Team", "type": "text", "width": 18}, ...]
+    """
+    # Build full column list: fixed + custom
+    cols = list(FIXED_COLS)
+    for cf in custom_fields:
+        width = int(cf.get("width", 20))
+        cols.append((cf["label"], width))
+    num_cols = len(cols)
+
     wb = Workbook()
     ws = wb.active
     ws.title = f"{project_key} Hierarchy"
     ws.freeze_panes = "B3"
 
-    for i, (_, w) in enumerate(COLS, 1):
+    for i, (_, w) in enumerate(cols, 1):
         ws.column_dimensions[get_column_letter(i)].width = w
     ws.row_dimensions[1].height = 22
     ws.row_dimensions[2].height = 20
 
     # Title row
-    ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=NUM_COLS)
+    ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=num_cols)
     tc = ws.cell(row=1, column=1,
                  value=f"Jira Project: {project_key}  —  Issue Hierarchy")
     tc.font      = Font(name="Arial", bold=True, size=12, color=C_HDR_FG)
@@ -277,7 +345,7 @@ def build_workbook(epics: list, story_map: dict,
     tc.alignment = Alignment(horizontal="center", vertical="center")
 
     # Header row
-    for ci, (hdr, _) in enumerate(COLS, 1):
+    for ci, (hdr, _) in enumerate(cols, 1):
         c = ws.cell(row=2, column=ci, value=hdr)
         c.font      = Font(name="Arial", bold=True, size=10, color=C_HDR_FG)
         c.fill      = mk_fill(C_HDR_BG)
@@ -297,7 +365,7 @@ def build_workbook(epics: list, story_map: dict,
         epic_span  = max(1, len(stories))
         epic_start = current_row
 
-        # Epic cell — col A, merged across all story rows
+        # Col A — Epic cell, merged across all story rows
         if epic_span > 1:
             ws.merge_cells(
                 start_row=epic_start, start_column=1,
@@ -312,7 +380,7 @@ def build_workbook(epics: list, story_map: dict,
         ec.border    = mk_border_all()
 
         if not stories:
-            for ci in range(2, NUM_COLS + 1):
+            for ci in range(2, num_cols + 1):
                 c = ws.cell(row=epic_start, column=ci)
                 c.fill   = mk_fill(C_EPIC_BG)
                 c.border = mk_border_bottom()
@@ -338,7 +406,8 @@ def build_workbook(epics: list, story_map: dict,
                 c.border = mk_border_bottom()
                 return c
 
-            sc(2,  story["key"],                                    bold=True)
+            # ── Fixed columns ─────────────────
+            sc(2,  story["key"],                            bold=True)
             sc(3,  gf(story, "summary"))
             # Status badge
             stc = ws.cell(row=row, column=4, value=status)
@@ -348,27 +417,33 @@ def build_workbook(epics: list, story_map: dict,
             stc.border    = mk_border_bottom()
 
             sc(5,  get_assignee(story))
-            sc(6,  get_priority(story),                             center=True)
-            sc(7,  get_story_points(story, sp_fields),              center=True)
-            sc(8,  get_start_date(story, start_fields),             center=True)
-            sc(9,  get_due_date(story, due_fields),                 center=True)
+            sc(6,  get_priority(story),                     center=True)
+            sc(7,  get_story_points(story, sp_fields),      center=True)
+            sc(8,  get_start_date(story, start_fields),     center=True)
+            sc(9,  get_due_date(story, due_fields),         center=True)
             sc(10, get_labels(story))
+
+            # ── Dynamic custom field columns ──
+            for cf_idx, cf in enumerate(custom_fields):
+                col   = 11 + cf_idx          # starts at column K
+                value = resolve_custom_field(story, cf["id"], cf.get("type", "text"))
+                sc(col, value, center=(cf.get("type") in ("date", "number")))
 
         current_row = epic_start + epic_span
 
     # Summary sheet
     ws2 = wb.create_sheet("Summary")
     ws2.column_dimensions["A"].width = 30
-    ws2.column_dimensions["B"].width = 14
-
-    total_stories = sum(len(v) for v in story_map.values())
-    epics_no_story = sum(1 for e in epics if not story_map.get(e["key"]))
+    ws2.column_dimensions["B"].width = 20
 
     summary_rows = [
-        ("Metric",                "Count"),
+        ("Metric",                "Value"),
         ("Total Epics",           len(epics)),
-        ("Total Stories",         total_stories),
-        ("Epics with no Stories", epics_no_story),
+        ("Total Stories",         sum(len(v) for v in story_map.values())),
+        ("Epics with no Stories", sum(1 for e in epics
+                                      if not story_map.get(e["key"]))),
+        ("Custom Fields",         ", ".join(cf["label"] for cf in custom_fields)
+                                  if custom_fields else "None"),
         ("Extracted on",          datetime.now().strftime("%d-%b-%Y %H:%M")),
     ]
     for ri, (lbl, val) in enumerate(summary_rows, 1):
@@ -380,7 +455,7 @@ def build_workbook(epics: list, story_map: dict,
             lc.fill = vc.fill = mk_fill(C_HDR_BG)
         else:
             lc.font = vc.font = Font(name="Arial", size=10)
-            vc.alignment = Alignment(horizontal="center")
+            vc.alignment = Alignment(horizontal="left", wrap_text=True)
         lc.alignment = Alignment(horizontal="left")
         ws2.row_dimensions[ri].height = 18
 
@@ -392,19 +467,26 @@ def build_workbook(epics: list, story_map: dict,
 # ──────────────────────────────────────────────────────────────────────────────
 
 def run(cfg: dict, logger: logging.Logger) -> None:
-    client      = JiraClient(cfg, logger)
-    project_key = cfg["project"]["key"]
-    output      = cfg["project"]["output"]
-    fields_cfg  = cfg.get("fields", {})
+    client         = JiraClient(cfg, logger)
+    project_key    = cfg["project"]["key"]
+    output         = cfg["project"]["output"]
+    fields_cfg     = cfg.get("fields", {})
+    custom_fields  = cfg.get("custom_fields", [])
 
+    if custom_fields:
+        logger.info("Custom fields configured: %s",
+                    ", ".join(f"{cf['label']} ({cf['id']})" for cf in custom_fields))
+
+    # Build the full list of Jira field IDs to request
     base_fields = [
         "summary", "status", "assignee", "priority", "labels",
         *fields_cfg.get("story_points", ["customfield_10016", "customfield_10028"]),
         *fields_cfg.get("start_date",   ["customfield_10015", "startDate"]),
         *fields_cfg.get("due_date",     ["duedate", "customfield_10021"]),
+        *[cf["id"] for cf in custom_fields],   # ← custom field IDs injected here
     ]
-    # De-duplicate
-    base_fields = list(dict.fromkeys(base_fields))
+    base_fields = list(dict.fromkeys(base_fields))   # de-duplicate, preserve order
+    logger.debug("Requesting fields: %s", base_fields)
 
     logger.info("Fetching Epics for project: %s", project_key)
     epics = client.fetch_all(
@@ -448,19 +530,19 @@ def run(cfg: dict, logger: logging.Logger) -> None:
             "fields": {
                 "summary":  "⚠ Stories without an Epic",
                 "status":   {"name": "N/A"},
-                "assignee": None,
-                "priority": None,
-                "labels":   [],
+                "assignee": None, "priority": None, "labels": [],
             },
         }
         epics.append(fake_epic)
         story_map["NO-EPIC"] = orphans
 
     logger.info("Building workbook …")
-    wb = build_workbook(epics, story_map, project_key, fields_cfg)
+    wb = build_workbook(epics, story_map, project_key, fields_cfg, custom_fields)
     wb.save(output)
-    logger.info("Saved → %s  (Epics: %d | Stories: %d)",
-                output, len(epics), sum(len(v) for v in story_map.values()))
+    logger.info("Saved → %s  (Epics: %d | Stories: %d | Custom columns: %d)",
+                output, len(epics),
+                sum(len(v) for v in story_map.values()),
+                len(custom_fields))
 
 
 # ──────────────────────────────────────────────────────────────────────────────
