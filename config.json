@@ -20,32 +20,17 @@
       "label": "Team",
       "type":  "text",
       "width": 20
-    },
-    {
-      "id":    "customfield_10060",
-      "label": "Release Version",
-      "type":  "text",
-      "width": 18
-    },
-    {
-      "id":    "customfield_10070",
-      "label": "Risk Level",
-      "type":  "text",
-      "width": 14
-    },
-    {
-      "id":    "customfield_10080",
-      "label": "Reviewed By",
-      "type":  "user",
-      "width": 22
-    },
-    {
-      "id":    "customfield_10090",
-      "label": "Target Date",
-      "type":  "date",
-      "width": 14
     }
   ],
+  "sharepoint": {
+    "enabled":   true,
+    "tenant_id": "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx",
+    "client_id": "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx",
+    "site_url":  "https://contoso.sharepoint.com/sites/YourTeamSite",
+    "library":   "Documents",
+    "folder":    "Jira Reports/SEC",
+    "filename":  "jira_hierarchy.xlsx"
+  },
   "fetch": {
     "max_results":  100,
     "timeout_secs": 30
