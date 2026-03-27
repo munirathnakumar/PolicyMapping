@@ -1,0 +1,25 @@
+{
+  "jira": {
+    "url":     "https://your-domain.atlassian.net",
+    "email":   "your-email@example.com",
+    "token":   "your-api-token"
+  },
+  "project": {
+    "key":     "PROJ",
+    "output":  "jira_hierarchy.xlsx"
+  },
+  "fields": {
+    "story_points": ["customfield_10016", "customfield_10028"],
+    "start_date":   ["customfield_10015", "startDate"],
+    "due_date":     ["duedate", "customfield_10021"],
+    "epic_link":    ["customfield_10014"]
+  },
+  "fetch": {
+    "max_results":  100,
+    "timeout_secs": 30
+  },
+  "logging": {
+    "level": "INFO",
+    "file":  "jira_extractor.log"
+  }
+}
