@@ -77,42 +77,57 @@ class JiraClient:
 
     def _build_session(self) -> requests.Session:
         session = requests.Session()
-        session.headers.update({"Accept": "application/json"})
+        session.headers.update({
+            "Accept":       "application/json",
+            "Content-Type": "application/json",
+        })
         session.auth = self.auth
         retry = Retry(
             total=3,
             backoff_factor=1,
             status_forcelist=[429, 500, 502, 503, 504],
-            allowed_methods=["GET"],
+            allowed_methods=["GET", "POST"],
         )
         session.mount("https://", HTTPAdapter(max_retries=retry))
         session.mount("http://",  HTTPAdapter(max_retries=retry))
         return session
 
     def fetch_all(self, jql: str, fields: list[str]) -> list[dict]:
-        """Paginate Jira search and return all matching issues."""
-        issues, start = [], 0
+        """Paginate Jira search/jql (POST) and return all matching issues.
+
+        Endpoint : POST /rest/api/3/search/jql
+        Pagination: cursor-based via 'nextPageToken' in the response body.
+        Docs      : https://developer.atlassian.com/cloud/jira/platform/rest/v3/api-group-issue-search/#api-rest-api-3-search-jql-post
+        """
+        issues         = []
+        next_page_token = None
         self.logger.debug("JQL: %s", jql)
+
         while True:
-            resp = self.session.get(
-                f"{self.base}/rest/api/3/search",
-                params={
-                    "jql":        jql,
-                    "fields":     ",".join(fields),
-                    "startAt":    start,
-                    "maxResults": self.max_results,
-                },
+            payload: dict = {
+                "jql":       jql,
+                "fields":    fields,
+                "maxResults": self.max_results,
+            }
+            if next_page_token:
+                payload["nextPageToken"] = next_page_token
+
+            resp = self.session.post(
+                f"{self.base}/rest/api/3/search/jql",
+                json=payload,
                 timeout=self.timeout,
             )
             resp.raise_for_status()
             data  = resp.json()
             batch = data.get("issues", [])
             issues.extend(batch)
-            start += len(batch)
-            total  = data.get("total", 0)
-            self.logger.debug("Fetched %d / %d", start, total)
-            if start >= total or not batch:
+            self.logger.debug("Fetched %d issues so far", len(issues))
+
+            # nextPageToken is absent (or null) on the last page
+            next_page_token = data.get("nextPageToken")
+            if not next_page_token or not batch:
                 break
+
         return issues
 
 
