@@ -1,3 +1,21 @@
+"""
+jira_extractor.py
+-----------------
+Production-ready Jira → Excel extractor.
+
+Layout
+    Column A  : Epic (key + name), merged vertically across all its stories
+    Columns B+ : One row per Story — fixed columns + any custom_fields from config
+
+Usage
+    python jira_extractor.py                      # uses config.json in CWD
+    python jira_extractor.py --config /path/to/config.json
+
+Dependencies
+    pip install requests openpyxl msal pywin32
+    (pywin32 is required for Windows broker/SSO support)
+"""
+
 import argparse
 import json
 import logging
@@ -9,6 +27,8 @@ import requests
 from requests.auth import HTTPBasicAuth
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
+
+import msal
 
 from openpyxl import Workbook
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
@@ -47,6 +67,13 @@ def load_config(path: str) -> dict:
                 f"custom_fields '{cf['id']}' has invalid type '{cf_type}'. "
                 f"Must be one of: {', '.join(VALID_TYPES)}"
             )
+
+    # Validate SharePoint config if present
+    sp = cfg.get("sharepoint", {})
+    if sp.get("enabled", False):
+        for key in ("site_url", "library", "folder", "client_id", "tenant_id"):
+            if not sp.get(key):
+                raise ValueError(f"sharepoint.{key} is required when sharepoint.enabled=true")
 
     return cfg
 
@@ -142,8 +169,206 @@ class JiraClient:
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Field value extractors
+# SharePoint client  (SharePoint Online — Windows SSO, no stored credentials)
 # ──────────────────────────────────────────────────────────────────────────────
+
+class SharePointClient:
+    """
+    Uploads/overwrites a file in SharePoint Online using your existing
+    Windows AD login session — no username or password stored anywhere.
+
+    Authentication flow:
+        1. Try silent SSO using the Windows account broker (WAM).
+           If your Windows session is already authenticated to your org AD,
+           this succeeds with zero prompts.
+        2. If the silent attempt fails (first run / token expired),
+           a small browser popup appears once — you log in, token is cached
+           locally by MSAL, and all future runs are silent again.
+
+    Config required:
+        sharepoint.client_id  — Azure AD App Registration client ID
+                                (your IT team registers this once; it only needs
+                                 Sites.ReadWrite.All *Delegated* permission)
+        sharepoint.tenant_id  — your Azure AD tenant ID (or "common")
+        sharepoint.site_url   — e.g. https://contoso.sharepoint.com/sites/MyTeam
+        sharepoint.library    — Document Library name, e.g. "Documents"
+        sharepoint.folder     — Subfolder path, e.g. "Jira Reports/SEC"
+        sharepoint.filename   — exact filename to overwrite in SharePoint
+    """
+
+    GRAPH_BASE = "https://graph.microsoft.com/v1.0"
+    SCOPES     = ["https://graph.microsoft.com/Sites.ReadWrite.All"]
+    # MSAL caches the token here so silent auth works on subsequent runs
+    TOKEN_CACHE_FILE = Path.home() / ".jira_extractor_token_cache.bin"
+
+    def __init__(self, cfg: dict, logger: logging.Logger):
+        sp               = cfg["sharepoint"]
+        self.client_id   = sp["client_id"]
+        self.tenant_id   = sp["tenant_id"]
+        self.site_url    = sp["site_url"].rstrip("/")
+        self.library     = sp["library"]
+        self.folder      = sp["folder"].strip("/")
+        self.sp_filename = sp.get("filename", cfg["project"]["output"])
+        self.logger      = logger
+
+    def _load_cache(self) -> msal.SerializableTokenCache:
+        cache = msal.SerializableTokenCache()
+        if self.TOKEN_CACHE_FILE.exists():
+            cache.deserialize(self.TOKEN_CACHE_FILE.read_text(encoding="utf-8"))
+        return cache
+
+    def _save_cache(self, cache: msal.SerializableTokenCache) -> None:
+        if cache.has_state_changed:
+            self.TOKEN_CACHE_FILE.write_text(
+                cache.serialize(), encoding="utf-8"
+            )
+            self.logger.debug("Token cache saved → %s", self.TOKEN_CACHE_FILE)
+
+    def _get_token(self) -> str:
+        """
+        Acquire a Graph API token using the current Windows login session.
+        Silent on every run after the first browser login.
+        """
+        cache     = self._load_cache()
+        authority = f"https://login.microsoftonline.com/{self.tenant_id}"
+
+        app = msal.PublicClientApplication(
+            self.client_id,
+            authority=authority,
+            token_cache=cache,
+        )
+
+        # 1 — Try silent acquisition from cached token
+        accounts = app.get_accounts()
+        result   = None
+        if accounts:
+            self.logger.debug("Attempting silent token acquisition for: %s",
+                              accounts[0].get("username"))
+            result = app.acquire_token_silent(self.SCOPES, account=accounts[0])
+
+        # 2 — Try Windows integrated auth (uses current Windows AD session, no popup)
+        if not result or "access_token" not in result:
+            self.logger.debug("Attempting Windows Integrated Auth (SSO) …")
+            try:
+                result = app.acquire_token_by_integrated_windows_auth(
+                    scopes=self.SCOPES
+                )
+            except Exception:
+                result = None
+
+        # 3 — Fall back to interactive browser login (first run / token expired)
+        if not result or "access_token" not in result:
+            self.logger.info(
+                "Opening browser for one-time SharePoint login "
+                "(future runs will be silent) …"
+            )
+            result = app.acquire_token_interactive(scopes=self.SCOPES)
+
+        if not result or "access_token" not in result:
+            err = (result or {}).get("error_description",
+                                     (result or {}).get("error", "Unknown"))
+            raise RuntimeError(f"SharePoint authentication failed: {err}")
+
+        self._save_cache(cache)
+        self.logger.debug("SharePoint token acquired")
+        return result["access_token"]
+
+    def _get_site_id(self, token: str) -> str:
+        from urllib.parse import urlparse
+        parsed    = urlparse(self.site_url)
+        hostname  = parsed.netloc
+        site_path = parsed.path.strip("/")
+        resp = requests.get(
+            f"{self.GRAPH_BASE}/sites/{hostname}:/{site_path}",
+            headers={"Authorization": f"Bearer {token}"},
+            timeout=30,
+        )
+        resp.raise_for_status()
+        site_id = resp.json()["id"]
+        self.logger.debug("Resolved SharePoint site ID: %s", site_id)
+        return site_id
+
+    def _get_drive_id(self, token: str, site_id: str) -> str:
+        resp = requests.get(
+            f"{self.GRAPH_BASE}/sites/{site_id}/drives",
+            headers={"Authorization": f"Bearer {token}"},
+            timeout=30,
+        )
+        resp.raise_for_status()
+        drives = resp.json().get("value", [])
+        for drive in drives:
+            if drive.get("name", "").lower() == self.library.lower():
+                self.logger.debug("Resolved drive: %s → %s",
+                                  self.library, drive["id"])
+                return drive["id"]
+        self.logger.warning("Library '%s' not found, using default drive",
+                            self.library)
+        return drives[0]["id"] if drives else "root"
+
+    def upload(self, local_path: str) -> str:
+        """
+        Overwrite the existing file in the SharePoint folder.
+        Creates the file if it does not exist yet.
+        Returns the SharePoint web URL of the uploaded file.
+        """
+        file_path = Path(local_path)
+        if not file_path.exists():
+            raise FileNotFoundError(f"Local file not found: {file_path}")
+
+        file_size = file_path.stat().st_size
+        self.logger.info(
+            "Uploading '%s' (%s KB) → %s / %s / %s",
+            self.sp_filename, round(file_size / 1024, 1),
+            self.site_url, self.library, self.folder,
+        )
+
+        token    = self._get_token()
+        site_id  = self._get_site_id(token)
+        drive_id = self._get_drive_id(token, site_id)
+
+        dest      = f"{self.folder}/{self.sp_filename}" if self.folder else self.sp_filename
+        auth_hdr  = {"Authorization": f"Bearer {token}"}
+
+        # Always use upload session — works for any file size and guarantees overwrite
+        session_url = (
+            f"{self.GRAPH_BASE}/sites/{site_id}/drives/{drive_id}"
+            f"/root:/{dest}:/createUploadSession"
+        )
+        sess = requests.post(
+            session_url,
+            headers={**auth_hdr, "Content-Type": "application/json"},
+            json={"item": {"@microsoft.graph.conflictBehavior": "replace"}},
+            timeout=30,
+        )
+        sess.raise_for_status()
+        upload_url = sess.json()["uploadUrl"]
+
+        CHUNK = 4 * 1024 * 1024   # 4 MB chunks
+        uploaded = 0
+        resp     = None
+
+        with file_path.open("rb") as f:
+            while True:
+                chunk = f.read(CHUNK)
+                if not chunk:
+                    break
+                end  = uploaded + len(chunk) - 1
+                resp = requests.put(
+                    upload_url,
+                    headers={
+                        "Content-Length": str(len(chunk)),
+                        "Content-Range":  f"bytes {uploaded}-{end}/{file_size}",
+                    },
+                    data=chunk,
+                    timeout=120,
+                )
+                resp.raise_for_status()
+                uploaded += len(chunk)
+
+        web_url = (resp.json() if resp else {}).get("webUrl", dest)
+        self.logger.info("SharePoint upload complete → %s", web_url)
+        return web_url
+
 
 def gf(issue: dict, *keys, default=""):
     """Safely traverse nested issue fields."""
@@ -543,6 +768,15 @@ def run(cfg: dict, logger: logging.Logger) -> None:
                 output, len(epics),
                 sum(len(v) for v in story_map.values()),
                 len(custom_fields))
+
+    # ── SharePoint upload ─────────────────────────────────────────────────────
+    sp_cfg = cfg.get("sharepoint", {})
+    if sp_cfg.get("enabled", False):
+        sp_client = SharePointClient(cfg, logger)
+        web_url   = sp_client.upload(output)
+        logger.info("File available at: %s", web_url)
+    else:
+        logger.info("SharePoint upload skipped (sharepoint.enabled=false)")
 
 
 # ──────────────────────────────────────────────────────────────────────────────
